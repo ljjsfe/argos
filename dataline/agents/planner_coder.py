@@ -47,6 +47,7 @@ def generate(
     *,
     state: AnalysisState | None = None,
     cm: ContextManager | None = None,
+    qa_guidance: str = "",
 ) -> PlannerCoderOutput:
     """Generate plan + code candidates in a single LLM call.
 
@@ -54,7 +55,7 @@ def generate(
     Returns PlannerCoderOutput with plan and ordered candidates.
     """
     if state and cm:
-        prompt = _build_context_managed_prompt(state, cm, llm)
+        prompt = _build_context_managed_prompt(state, cm, llm, qa_guidance=qa_guidance)
     else:
         prompt = _build_legacy_prompt(question, manifest_json, data_profile, steps_done)
 
@@ -70,6 +71,8 @@ def _build_context_managed_prompt(
     state: AnalysisState,
     cm: ContextManager,
     llm: Any,
+    *,
+    qa_guidance: str = "",
 ) -> str:
     """Build budget-managed context with all information in one prompt."""
     sections = []
@@ -89,6 +92,16 @@ def _build_context_managed_prompt(
             name="judge_guidance",
             content=f"## Judge Guidance (MUST ADDRESS)\n{state.judge_guidance}",
             priority=95,
+            compressible=False,
+            heading="",
+        ))
+
+    # QA guidance — structural hints from QuestionAnalyzer
+    if qa_guidance:
+        sections.append(Section(
+            name="qa_guidance",
+            content=f"## Answer Shape Hints (from question analysis)\n{qa_guidance}",
+            priority=85,
             compressible=False,
             heading="",
         ))
@@ -258,7 +271,7 @@ def _extract_code_candidates(response: str) -> tuple[str, ...]:
     # Filter out the JSON plan block
     candidates = []
     for match in matches:
-        stripped = match.strip()
+        stripped = _strip_fence_lines(match.strip())
         # Skip JSON blocks
         if stripped.startswith("{") and stripped.endswith("}"):
             try:
@@ -270,6 +283,21 @@ def _extract_code_candidates(response: str) -> tuple[str, ...]:
             candidates.append(stripped)
 
     return tuple(candidates)
+
+
+def _strip_fence_lines(code: str) -> str:
+    """Remove residual markdown fence lines from extracted code.
+
+    Some models (e.g. Qwen) wrap output in double fences:
+        ```python
+        ```python        ← captured as line 1, causes SyntaxError
+        import pandas...
+        ```
+    Strip any lines that are purely a code fence marker.
+    """
+    lines = code.split("\n")
+    cleaned = [ln for ln in lines if not re.match(r"^\s*```", ln)]
+    return "\n".join(cleaned)
 
 
 def _extract_inline_json(response: str) -> dict:

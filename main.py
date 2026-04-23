@@ -30,7 +30,7 @@ def main():
     eval_parser = subparsers.add_parser("eval", help="Evaluate results against gold")
     eval_parser.add_argument("--results", required=True, help="Results directory")
     eval_parser.add_argument("--benchmark", default="kdd", help="Benchmark: kdd | dabstep")
-    eval_parser.add_argument("--gold", default="data/demo", help="Gold dir (KDD) or DABstep root")
+    eval_parser.add_argument("--gold", default="public", help="Gold dir (KDD) or DABstep root")
     eval_parser.add_argument("--label", default="", help="Run label for the log")
     eval_parser.add_argument("--model", default="", help="Model used (for log)")
     eval_parser.add_argument("--provider", default="", help="Provider used (for log)")
@@ -45,7 +45,7 @@ def main():
     # --- batch: run on all tasks ---
     batch_parser = subparsers.add_parser("batch", help="Run on all tasks in a dataset")
     batch_parser.add_argument("--benchmark", default="kdd", help="Benchmark: kdd | dabstep")
-    batch_parser.add_argument("--data", default="data/demo", help="Dataset root directory")
+    batch_parser.add_argument("--data", default="public", help="Dataset root directory")
     batch_parser.add_argument("--output", default="./results", help="Output directory")
     batch_parser.add_argument("--config", default="config.yaml", help="Config file")
     batch_parser.add_argument("--tasks", nargs="*", help="Specific task IDs (default: all)")

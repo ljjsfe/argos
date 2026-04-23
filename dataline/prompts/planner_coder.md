@@ -101,6 +101,7 @@ SELECT COUNT(*) FROM (
 - Add `# REASON:` comment before every operation explaining WHY
 - Print intermediate row counts after each filter/join
 - Call `save_result()` as the LAST line for computation steps
+- `save_result(answer={"col1": [...], "col2": [...]})` — ONLY include the exact answer columns. Do NOT add "summary", "metadata", "explanation", "notes", or any extra keys. Extra columns reduce your score.
 - Use `describe_data()` when loading new data sources
 - Do NOT round numbers unless question explicitly asks for specific precision
 - Cast counts to int (never leave as float)
@@ -141,33 +142,29 @@ Return a JSON plan block followed by code candidates:
 }
 ```
 
-Then provide code candidate(s). EVERY candidate must be a complete, self-contained Python script (even SQL needs a Python wrapper). Include all imports.
+Then provide code candidate(s).
 
-```python
-# Candidate 1: SQL approach via DuckDB
-import duckdb
-import os
+### SQL candidates: write RAW SQL only (preferred for structured data)
 
-task_dir = os.environ["TASK_DIR"]
-conn = duckdb.connect()
+For SQL candidates, write ONLY the SQL query — no Python wrapper needed. The sandbox auto-registers CSV files as views (filename without extension becomes the view name, hyphens→underscores) and attaches .db/.sqlite files.
 
-result = conn.execute(f"""
-    SELECT column FROM read_csv_auto('{task_dir}/data.csv')
-    WHERE condition
-""").fetchdf()
-
-print(result.to_string(index=False))
-print(f"Result rows: {len(result)}")
-
-from data_helpers import save_result
-save_result(
-    answer={{"column": list(result["column"])}},
-    row_counts={{"result_rows": len(result)}},
-)
+```sql
+-- Candidate 1: DuckDB SQL (CSV files auto-registered as views)
+SELECT column, COUNT(*) as cnt
+FROM data  -- "data.csv" is auto-registered as view "data"
+WHERE condition = 'value'
+GROUP BY column
+ORDER BY cnt DESC
 ```
 
+For CSV files, you can also use `read_csv_auto('/path/to/file.csv')` explicitly if you need control over parsing.
+
+For .db/.sqlite files, tables are available directly by name.
+
+### Python candidates: full self-contained scripts
+
 ```python
-# Candidate 2: pandas approach
+# Candidate 2: Python approach (for complex logic, multi-step, or unstructured data)
 import pandas as pd
 import os
 from data_helpers import safe_read_csv, save_result
@@ -182,3 +179,7 @@ save_result(
     row_counts={{"loaded": len(df), "filtered": len(filtered)}},
 )
 ```
+
+### Mixed candidates
+
+You can mix SQL and Python candidates in the same step. List SQL first (simpler, preferred), Python as fallback.

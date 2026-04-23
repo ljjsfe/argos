@@ -1,11 +1,11 @@
 llm:
-  provider: moonshot
-  model: kimi-k2.5  # Latest Kimi state-of-art model
-  base_url: https://api.moonshot.cn/v1
-  api_key_env: MOONSHOT_API_KEY
+  provider: dashscope
+  model: qwen3.5-35b-a3b
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  api_key_env: DASHSCOPE_API_KEY
   max_tokens: 8192
-  temperature: 1.0  # kimi-k2.5 only accepts temperature=1
-  context_window: 262144  # Model's max input tokens (used by ContextManager)
+  temperature: 0.0
+  context_window: 262144  # Qwen3.5-35B-A3B 262K context
 
 agent:
   max_iterations: 8
@@ -23,7 +23,7 @@ synthesizer:
   normalize_numbers: true
 
 eval:
-  kdd_gold_dir: data/demo
+  kdd_gold_dir: public
   dabstep_dir: data/dabstep
 
 batch:

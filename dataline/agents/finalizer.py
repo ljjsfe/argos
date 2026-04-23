@@ -186,6 +186,12 @@ def _try_structured_extract(state: AnalysisState | None) -> dict | None:
         answer = data.get("answer", {})
         if not isinstance(answer, dict) or not answer:
             continue
+        # Drop metadata-only keys that some models add (e.g. "summary", "metadata",
+        # "explanation", "notes") — these are never real data columns.
+        _METADATA_KEYS = {"summary", "metadata", "explanation", "notes", "description"}
+        answer = {k: v for k, v in answer.items() if k.lower() not in _METADATA_KEYS}
+        if not answer:
+            continue
         # Validate: all values must be lists of the same length
         if all(isinstance(v, list) for v in answer.values()):
             lengths = {len(v) for v in answer.values()}

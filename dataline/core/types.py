@@ -99,6 +99,42 @@ class JudgeDecision:
 
 
 @dataclass(frozen=True)
+class QuestionSpec:
+    """Structured shape specification inferred from the question.
+
+    Produced by QuestionAnalyzer (one LLM call before the loop).
+    Consumed by HarnessGate (Rules 10-13) and PlannerCoder (guidance).
+    Fail-open: unknown values cause QA rules to skip silently.
+    """
+    answer_type: str = "unknown"           # "scalar" | "list" | "table" | "unknown"
+    expected_column_count: int = 0         # 0 = unknown
+    expected_row_count: str = "unknown"    # "single" | "multiple" | "unknown"
+    value_style: str = "unknown"           # "numeric" | "exact_term" | "name" | "mixed" | "unknown"
+    notes: str = ""                        # semantic interpretation (trace only, NOT injected into prompt)
+
+    def to_guidance(self) -> str:
+        """Structural hints for PlannerCoder. Excludes notes (may be wrong)."""
+        parts: list[str] = []
+        if self.answer_type != "unknown":
+            parts.append(f"Expected answer shape: {self.answer_type}")
+        if self.expected_column_count > 0:
+            parts.append(f"Expected column count: {self.expected_column_count}")
+        if self.expected_row_count != "unknown":
+            parts.append(f"Expected row count: {self.expected_row_count}")
+        if self.value_style != "unknown":
+            parts.append(f"Value style: {self.value_style}")
+        return "\n".join(parts) if parts else ""
+
+
+@dataclass(frozen=True)
+class HarnessFlag:
+    """A single deterministic verification flag from HarnessGate."""
+    rule: str        # rule identifier (e.g., "agg_type", "empty_output")
+    severity: str    # "block" | "warn"
+    message: str     # human-readable description for guidance/Judge context
+
+
+@dataclass(frozen=True)
 class LLMUsage:
     """Token and cost tracking for a single LLM call."""
     input_tokens: int

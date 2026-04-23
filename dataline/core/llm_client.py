@@ -1,4 +1,4 @@
-"""Unified LLM adapter. Kimi (Moonshot) primary, Anthropic secondary."""
+"""Unified LLM adapter. Supports moonshot, dashscope (Qwen), openai, deepseek, anthropic."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ class LLMClient:
         self._total_usage = {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
 
     def _build_client(self) -> Any:
-        if self._config.provider in ("moonshot", "openai", "deepseek"):
+        if self._config.provider in ("moonshot", "openai", "deepseek", "dashscope"):
             from openai import OpenAI
             return OpenAI(
                 api_key=self._config.api_key,
@@ -58,7 +58,7 @@ class LLMClient:
 
         start = time.time()
 
-        if self._config.provider in ("moonshot", "openai", "deepseek"):
+        if self._config.provider in ("moonshot", "openai", "deepseek", "dashscope"):
             return self._chat_openai_compat(system, user, start)
         elif self._config.provider == "anthropic":
             return self._chat_anthropic(system, user, start)
@@ -214,6 +214,7 @@ class LLMClient:
             "anthropic": (0.003, 0.015),     # Sonnet
             "openai": (0.005, 0.015),        # GPT-4o
             "deepseek": (0.0014, 0.0028),    # DeepSeek V3
+            "dashscope": (0.0035, 0.007),    # Qwen3.5-35B-A3B (rough USD equiv)
         }
         input_rate, output_rate = rates.get(self._config.provider, (0.01, 0.01))
         return (input_tokens * input_rate + output_tokens * output_rate) / 1000

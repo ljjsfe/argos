@@ -3,8 +3,8 @@
 Replaces the separate Verifier → Router pipeline with a single LLM call,
 saving ~30% token cost per iteration while providing richer guidance.
 
-The old verifier.py and router.py are kept for backward compatibility
-but are no longer called by the orchestrator.
+HarnessGate warn flags are passed in via harness_warnings parameter
+(block flags are handled by the orchestrator before Judge is called).
 """
 
 from __future__ import annotations
@@ -17,8 +17,7 @@ from ..core.context_manager import ContextManager, Section
 from ..core.llm_client import LLMClient
 
 from ..core.token_estimator import cap_text
-from ..core.types import AnalysisState, JudgeDecision, StepRecord
-from . import sanity_checker
+from ..core.types import AnalysisState, HarnessFlag, JudgeDecision, StepRecord
 
 
 def evaluate(
@@ -30,6 +29,7 @@ def evaluate(
     cm: ContextManager | None = None,
     iteration: int = 0,
     max_iterations: int = 8,
+    harness_warnings: list[HarnessFlag] | None = None,
 ) -> JudgeDecision:
     """Evaluate progress and decide next action in a single LLM call.
 
@@ -46,14 +46,13 @@ def evaluate(
     if state is not None and cm is not None:
         sections = _build_sections(state)
 
-        # Inject deterministic sanity flags as high-priority evidence before LLM call
-        flags = sanity_checker.compute_flags(state)
-        if flags:
-            flags_text = "\n".join(f"- {f}" for f in flags)
+        # Inject HarnessGate warn flags as evidence for the LLM judge
+        if harness_warnings:
+            flags_text = "\n".join(f"- [{f.rule}] {f.message}" for f in harness_warnings)
             sections.append(Section(
-                "sanity_flags", flags_text,
+                "harness_warnings", flags_text,
                 priority=92, compressible=False,
-                heading="## Pre-check Flags (deterministic — address in your reasoning)",
+                heading="## HarnessGate Warnings (deterministic — address in your reasoning)",
             ))
 
         context = cm.assemble(sections, llm=llm)

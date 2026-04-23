@@ -1,15 +1,14 @@
 """Orchestrator: unified loop coordinating all agents.
 
-Pipeline:
-  Profiler → Analyzer → Loop(PlannerCoder → Sandbox → Judge) → Skeptic → Finalizer
+Pipeline (v5):
+  Profiler → Analyzer → QuestionAnalyzer → Loop(PlannerCoder → Sandbox → HarnessGate → Judge) → Finalizer
 
-Design principles:
-- Single unified loop handles both simple (1-step SQL) and complex (multi-step Python) tasks.
-- PlannerCoder generates plan + multiple code candidates in one LLM call.
-- Sandbox tries candidates in order — first success wins.
-- Judge decides: finish / continue / backtrack.
-- Skeptic provides adversarial verification before final output.
-- Workspace files provide observability (write-only during execution).
+Changes from v4:
+- QuestionAnalyzer runs once before loop, produces QuestionSpec
+- HarnessGate sits between Sandbox and Judge (zero LLM cost)
+  - block flags → skip Judge, use message as guidance
+  - warn flags → passed to Judge as reference
+- Skeptic removed (experimentally proven 0% effective)
 """
 
 from __future__ import annotations
@@ -44,7 +43,7 @@ from ..core.types import (
 from ..core.workspace import Workspace
 from ..profiler import manifest as profiler
 from ..profiler.manifest import manifest_to_json
-from . import analyzer, judge, debugger, finalizer, skeptic
+from . import analyzer, judge, debugger, finalizer, harness_gate, question_analyzer
 from .planner_coder import generate as planner_coder_generate, PlannerCoderOutput
 from .code_validator import validate_column_references
 
@@ -87,7 +86,6 @@ def run_task(
     max_retries = config.get("agent", {}).get("max_retries", 2)
     backtrack_limit = config.get("agent", {}).get("backtrack_limit", 3)
     stagnation_threshold = config.get("agent", {}).get("stagnation_threshold", 2)
-    enable_skeptic = config.get("agent", {}).get("enable_skeptic", True)
 
     # Initialize tracer for real-time progress + LLM I/O logging
     tracer = TaskTracer(task_id, output_dir, session_id=session_id)
@@ -109,8 +107,8 @@ def run_task(
     obs: dict[str, Any] = {
         "profiler": {},
         "analyzer": {},
+        "question_analyzer": {},
         "iterations": [],
-        "skeptic": {},
         "final": {},
     }
 
@@ -157,10 +155,34 @@ def run_task(
             "analysis_success": len(data_profile) > 50,
         }
 
+        # ─── Stage 2b: QuestionAnalyzer (1 LLM call, infer answer shape) ───
+        with tracer.span("question_analyzer"):
+            _log(trace, "question_analyzer", "Inferring answer shape")
+            question_spec = question_analyzer.analyze(
+                question, manifest_json, domain_rules, traced_llm,
+            )
+            qa_guidance = question_spec.to_guidance()
+            _log(trace, "question_analyzer",
+                 f"type={question_spec.answer_type}, "
+                 f"cols={question_spec.expected_column_count}, "
+                 f"rows={question_spec.expected_row_count}, "
+                 f"style={question_spec.value_style}")
+
+        obs["question_analyzer"] = {
+            "answer_type": question_spec.answer_type,
+            "expected_column_count": question_spec.expected_column_count,
+            "expected_row_count": question_spec.expected_row_count,
+            "value_style": question_spec.value_style,
+        }
+
         # ─── Stage 3: Initialize state ───
         state = create_initial_state(
             task_id, question, manifest, data_profile, domain_rules,
         )
+
+        # Inject QA analysis into state for downstream agents
+        if qa_guidance:
+            state = set_question_analysis(state, qa_guidance)
 
         # Track execution state
         steps_done: list[StepRecord] = []
@@ -187,6 +209,7 @@ def run_task(
                 pc_output = planner_coder_generate(
                     question, manifest_json, data_profile, steps_done,
                     traced_llm, state=state, cm=cm,
+                    qa_guidance=qa_guidance,
                 )
             _log(trace, "planner_coder",
                  f"Plan: {pc_output.plan.step_description} | "
@@ -205,21 +228,22 @@ def run_task(
             step_id = f"step_{iteration}"
 
             for ci, candidate_code in enumerate(pc_output.candidates):
-                # Detect candidate language for logging
-                is_sql_candidate = "duckdb" in candidate_code or "sqlite3" in candidate_code
-                candidate_lang = "sql" if is_sql_candidate else "python"
+                # Detect if candidate is raw SQL (no Python imports/statements)
+                candidate_lang = _detect_language(candidate_code, pc_output.language)
 
-                # Pre-execution validation
-                annotated_code, col_warnings = validate_column_references(
-                    candidate_code, manifest,
-                )
-                if col_warnings:
-                    _log(trace, "code_validator", f"Candidate {ci} warnings: {col_warnings}")
-                    candidate_code = annotated_code
+                # Pre-execution validation (only for Python — raw SQL has no column refs to annotate)
+                if candidate_lang == "python":
+                    annotated_code, col_warnings = validate_column_references(
+                        candidate_code, manifest,
+                    )
+                    if col_warnings:
+                        _log(trace, "code_validator", f"Candidate {ci} warnings: {col_warnings}")
+                        candidate_code = annotated_code
 
                 with tracer.span("sandbox", metadata={"step_id": step_id, "candidate": ci, "lang": candidate_lang}):
                     candidate_result = sandbox.execute(
                         candidate_code, step_id=f"{step_id}_c{ci}",
+                        language=candidate_lang,
                     )
 
                 if candidate_result.return_code == 0:
@@ -239,7 +263,6 @@ def run_task(
 
             # If all candidates failed, try debugger on the first one
             if result is None or result.return_code != 0:
-                # Use first candidate as base for debugging
                 base_code = pc_output.candidates[0] if pc_output.candidates else ""
                 base_result = result or SandboxResult(
                     stdout="", stderr="No candidates generated",
@@ -294,6 +317,45 @@ def run_task(
             state = add_step(state, step_record, finding)
             workspace.append_progress(iteration, pc_output.plan.step_description, finding)
 
+            # ── HarnessGate: deterministic verification (zero LLM cost) ──
+            harness_flags = harness_gate.check(
+                question=question,
+                code=winning_code,
+                stdout=result.stdout,
+                return_code=result.return_code,
+                data_profile=data_profile,
+                question_spec=question_spec,
+                structured_json=result.structured_json,
+            )
+
+            blocking = [f for f in harness_flags if f.severity == "block"]
+            warnings = [f for f in harness_flags if f.severity == "warn"]
+
+            if harness_flags:
+                flag_summary = "; ".join(
+                    f"[{f.rule}:{f.severity}] {f.message[:80]}"
+                    for f in harness_flags
+                )
+                _log(trace, "harness_gate", flag_summary)
+                iter_obs["harness_flags"] = [
+                    {"rule": f.rule, "severity": f.severity, "message": f.message}
+                    for f in harness_flags
+                ]
+
+            if blocking:
+                # Skip Judge — use blocking messages as guidance for next iteration
+                judge_guidance = "\n".join(
+                    f"[{f.rule}] {f.message}" for f in blocking
+                )
+                _log(trace, "harness_gate",
+                     f"BLOCKED — skipping Judge, {len(blocking)} block flags")
+                iter_obs["judge_sufficient"] = False
+                iter_obs["judge_action"] = "continue (harness_blocked)"
+                obs["iterations"].append(iter_obs)
+
+                prev_guidance = judge_guidance
+                continue
+
             # ── Judge: sufficiency + routing + guidance ──
             with tracer.span("judge", metadata={"iteration": iteration}):
                 _log(trace, "judge", "Evaluating progress")
@@ -301,6 +363,7 @@ def run_task(
                     question, steps_done, traced_llm,
                     state=state, cm=cm,
                     iteration=iteration, max_iterations=max_iterations,
+                    harness_warnings=warnings,
                 )
             _log(trace, "judge",
                  f"sufficient={verdict.sufficient}, action={verdict.action}, "
@@ -376,77 +439,7 @@ def run_task(
                     stagnation_count = 0
                     state = set_question_analysis(state, "")
 
-        # ─── Stage 5: Skeptic (adversarial verification) ───
-        skeptic_result = {"likely_wrong": False, "concern": ""}
-        if enable_skeptic and steps_done:
-            with tracer.span("skeptic"):
-                # Get the best answer so far for skeptic review
-                pre_answer = finalizer.format_answer(
-                    question, steps_done, traced_llm,
-                    state=state, cm=cm, benchmark=benchmark,
-                    guidelines=guidelines,
-                )
-                answer_str = json.dumps(pre_answer, ensure_ascii=False)
-                skeptic_result = skeptic.check(question, answer_str, traced_llm)
-                _log(trace, "skeptic",
-                     f"likely_wrong={skeptic_result['likely_wrong']}, "
-                     f"concern='{skeptic_result.get('concern', '')}'")
-
-        obs["skeptic"] = skeptic_result
-
-        # If skeptic flags concern, run one correction iteration (full loop: PlannerCoder → Sandbox → Judge)
-        if skeptic_result.get("likely_wrong") and steps_done:
-            concern = skeptic_result.get("concern", "")
-            _log(trace, "orchestrator",
-                 f"Skeptic flagged concern: {concern}. Running correction iteration.")
-            state = update_judge_guidance(
-                state,
-                f"SKEPTIC CONCERN: {concern}. "
-                "Re-examine your approach and fix the issue.",
-            )
-
-            # One full iteration with Judge validation
-            with tracer.span("planner_coder", metadata={"iteration": "skeptic_retry"}):
-                pc_output = planner_coder_generate(
-                    question, manifest_json, data_profile, steps_done,
-                    traced_llm, state=state, cm=cm,
-                )
-
-            correction_result = None
-            for candidate_code in pc_output.candidates:
-                candidate_result = sandbox.execute(
-                    candidate_code, step_id="skeptic_correction",
-                )
-                if candidate_result.return_code == 0:
-                    correction_result = candidate_result
-                    step_record = StepRecord(
-                        plan=pc_output.plan,
-                        code=candidate_code,
-                        result=candidate_result,
-                        step_index=len(steps_done),
-                    )
-                    steps_done.append(step_record)
-                    finding = summarize_step_output(candidate_result.stdout)
-                    state = add_step(state, step_record, finding)
-                    break
-
-            # Judge validates the correction (don't blindly trust it)
-            if correction_result and correction_result.return_code == 0:
-                with tracer.span("judge", metadata={"iteration": "skeptic_verify"}):
-                    verify_verdict = judge.evaluate(
-                        question, steps_done, traced_llm,
-                        state=state, cm=cm,
-                        iteration=len(steps_done) - 1, max_iterations=max_iterations,
-                    )
-                _log(trace, "judge",
-                     f"Skeptic correction verdict: action={verify_verdict.action}")
-                # If Judge rejects the correction, discard it (keep original answer)
-                if verify_verdict.action == "backtrack":
-                    steps_done.pop()
-                    _log(trace, "orchestrator",
-                         "Judge rejected skeptic correction — keeping original answer.")
-
-        # ─── Stage 6: Finalizer ───
+        # ─── Stage 5: Finalizer ───
         with tracer.span("finalizer"):
             _log(trace, "finalizer", "Formatting final answer")
             answer = finalizer.format_answer(
@@ -471,14 +464,12 @@ def run_task(
             "answer_columns": list(answer.keys()),
             "answer_rows": len(next(iter(answer.values()), [])) if answer else 0,
             "success": True,
-            "skeptic_flagged": skeptic_result.get("likely_wrong", False),
-            "execution_path": execution_path,  # e.g., ["step_0:sql", "step_1:python"]
+            "execution_path": execution_path,
             "languages_used": sorted({i.get("winning_language", i.get("language", "?")) for i in obs["iterations"]}),
         }
         _log(trace, "summary",
              f"Completed in {len(obs['iterations'])} iterations | "
-             f"Path: {' → '.join(execution_path)} | "
-             f"Skeptic: {'flagged' if skeptic_result.get('likely_wrong') else 'passed'}")
+             f"Path: {' → '.join(execution_path)}")
 
         workspace.persist()
         tracer.set_observations(obs)
@@ -518,6 +509,29 @@ def run_task(
         )
     finally:
         sandbox.cleanup()
+
+
+def _detect_language(code: str, planner_hint: str) -> str:
+    """Detect whether a candidate is raw SQL or a Python script.
+
+    Raw SQL: starts with SELECT/WITH/INSERT/CREATE or contains no Python
+    keywords (import, def, print, =). The planner_hint from PlannerCoder
+    is used as a tiebreaker.
+    """
+    stripped = code.strip()
+    first_word = stripped.split()[0].upper() if stripped else ""
+
+    # Obvious SQL starters
+    if first_word in ("SELECT", "WITH", "INSERT", "CREATE", "UPDATE", "DELETE",
+                      "ATTACH", "PRAGMA", "EXPLAIN"):
+        # But if it also has Python (import, def), it's a Python script with SQL inside
+        has_python = any(
+            kw in code for kw in ("import ", "def ", "print(", "from ", "= ", "if ")
+        )
+        if not has_python:
+            return "sql"
+
+    return "python"
 
 
 def _log(trace: list[dict], agent: str, message: str) -> None:

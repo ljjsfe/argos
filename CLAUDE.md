@@ -27,18 +27,21 @@ Profiler (deterministic, zero LLM cost) → Manifest
     │
 Analyzer (deep profiling via code execution) → DataProfile + DomainRules
     │
+QuestionAnalyzer (1 LLM call) → QuestionSpec (answer shape)
+    │
 Loop (max 8 iterations):
     PlannerCoder → plan + code candidates (SQL or Python) in ONE call
     Sandbox      → try candidates in order, first success wins
         └─ all fail → Debugger → retry (max 2)
+    HarnessGate  → deterministic verification (zero LLM cost, 13 rules)
+        ├─ block → skip Judge, use message as guidance, retry
+        └─ warn  → pass to Judge as reference
     Judge        → sufficiency + shape verification + routing + guidance
         ├─ finish    → exit loop
         ├─ continue  → loop (guidance passed to next PlannerCoder call)
         └─ backtrack → truncate to step N, re-plan
     │
-Sanity Check (deterministic) → Skeptic (adversarial, 1 call) → Finalizer
-    │
-prediction.csv + trace.json
+Finalizer → prediction.csv + trace.json
 ```
 
 ---
@@ -48,10 +51,11 @@ prediction.csv + trace.json
 | Agent | File | Role |
 |-------|------|------|
 | Analyzer | `dataline/agents/analyzer.py` | Generates + executes profiling scripts per file |
+| QuestionAnalyzer | `dataline/agents/question_analyzer.py` | Infers answer shape (QuestionSpec) before loop — 1 LLM call |
 | PlannerCoder | `dataline/agents/planner_coder.py` | Plans + generates code (SQL/Python) candidates in ONE call |
+| HarnessGate | `dataline/agents/harness_gate.py` | Deterministic verification (13 rules, zero LLM cost) |
 | Judge | `dataline/agents/judge.py` | Sufficiency + shape verification + routing + guidance |
 | Debugger | `dataline/agents/debugger.py` | Fixes code using traceback + data context |
-| Skeptic | `dataline/agents/skeptic.py` | Adversarial verification (question vs answer only, fail-open) |
 | Finalizer | `dataline/agents/finalizer.py` | Formats results → prediction.csv |
 | Orchestrator | `dataline/agents/orchestrator.py` | Unified loop wiring all agents |
 
@@ -64,7 +68,8 @@ prediction.csv + trace.json
 | PlannerCoder merged | Same reasoning process shouldn't be split — avoids info loss between plan→code |
 | Multi-candidate output | LLM outputs 2-3 code candidates per call; try in order, first success wins (free) |
 | SQL-first for structured data | SQL is declarative and precise; LLM generates correct SQL at higher rate than pandas |
-| Skeptic (adversarial) | Separate evaluator sees only question+answer, not code — prevents rationalization |
+| HarnessGate (deterministic) | 13 rules catch structural errors at zero LLM cost before Judge sees the result |
+| QuestionAnalyzer (shape inference) | One LLM call pre-loop; feeds HarnessGate QA rules + PlannerCoder guidance |
 | Shape verification in Judge | Catches partial results: answer shape must match question type (scalar/list/table) |
 | Persistent sandbox state | Never re-execute completed steps |
 | Profiler is zero LLM cost | Deterministic, testable, saves tokens |
@@ -95,10 +100,10 @@ run eval → read diagnostics → identify bottleneck agent → fix → re-run e
 Key eval commands:
 ```bash
 # Run single task
-python main.py --task ./data/demo/input/task_11 --output ./results/task_11
+python main.py --task ./public/input/task_11 --output ./results/task_11
 
 # Run full KDD eval (50 tasks)
-python eval/run_eval.py --data data/demo --output results/eval_$(date +%Y%m%d)
+python eval/run_eval.py --data public --output results/eval_$(date +%Y%m%d)
 
 # Compare two runs
 python eval/compare.py results/eval_A results/eval_B
@@ -112,14 +117,14 @@ python eval/compare.py results/eval_A results/eval_B
 dataline/
 ├── core/          # types.py, llm_client.py, sandbox.py
 ├── profiler/      # manifest.py + readers (csv, sqlite, json, md, pdf, docx, excel, image, parquet)
-├── agents/        # orchestrator + 7 agent roles
-├── synthesizer/   # base.py, normalizer.py, kdd_mode.py
+├── agents/        # orchestrator + 7 agent roles (+ harness_gate, question_analyzer)
+├── synthesizer/   # base.py, normalizer.py
 ├── prompts/       # .md prompt templates per agent
 ├── eval/          # scorer, run_eval, diagnostics, failure_analysis
 └── tests/
 
+public/            # KDD Cup Phase 1, 50 tasks (gold answers in public/output/)
 data/
-├── demo/          # KDD Cup Phase 1, 50 tasks (gold answers in demo/output/)
 └── dabstep/       # DABstep benchmark (Adyen payments)
 
 config.yaml        # LLM + agent + sandbox + eval config

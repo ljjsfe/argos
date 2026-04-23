@@ -1,5 +1,6 @@
 # Data (large, not code)
 data/
+public/
 results/
 
 # Python

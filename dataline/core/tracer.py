@@ -1,19 +1,27 @@
-"""Structured tracing with optional Langfuse integration.
+"""Structured tracing with Langfuse integration.
 
-Three-layer trace output:
-  L0 — Task summary: one glance to see pass/fail, bottleneck, decision path
-  L1 — Iteration summaries: per-loop plan → result → judge verdict
+Three-layer trace hierarchy:
+  Session (eval run) → Task (single question) → Agent spans
+
+Three-layer output detail:
+  L0 — Task summary: pass/fail, bottleneck, decision path, harness flags
+  L1 — Iteration summaries: plan → result → harness → judge verdict
   L2 — Full LLM I/O: raw prompts and responses for deep debugging
 
-Langfuse is an optional dependency. Without it, traces are saved as JSON only.
-With it, spans are automatically pushed to Langfuse UI (localhost:3000).
+Langfuse integration (v4 SDK):
+- Session = eval run (groups tasks)
+- Trace = single task (one question → one prediction.csv)
+- Observation = agent call (generation for LLM calls, span for non-LLM)
+- Scores = task accuracy (posted after eval scoring)
+
+Without Langfuse installed/configured, traces are saved as JSON only.
 
 Usage in orchestrator:
-    tracer = TaskTracer(task_id, output_dir)
-    with tracer.span("planner", metadata={"iteration": 0}) as s:
-        result = planner.plan_next(...)
+    tracer = TaskTracer(task_id, output_dir, session_id="eval_20260423")
+    with tracer.span("planner_coder", metadata={"iteration": 0}) as s:
+        result = planner_coder.generate(...)
         s.set_llm_io(system, user, response)
-    tracer.set_observations(obs)   # pass L0/L1 data from orchestrator
+    tracer.set_observations(obs)
     tracer.finish()
 """
 
@@ -104,18 +112,23 @@ class SpanBuilder:
 
 
 class TaskTracer:
-    """Traces a single task execution with real-time progress updates."""
+    """Traces a single task execution with real-time progress updates.
+
+    Hierarchy in Langfuse:
+      Session (session_id) → Trace (task_id) → Observations (agent spans)
+    """
 
     def __init__(self, task_id: str, output_dir: str = "", session_id: str = ""):
         self._task_id = task_id
         self._output_dir = output_dir
+        self._session_id = session_id
         self._spans: list[Span] = []
         self._start_time = time.time()
         self._current_span: SpanBuilder | None = None
         self._observations: dict[str, Any] = {}
 
         # Langfuse (optional)
-        self._langfuse, self._lf_trace, self._lf_session_ctx = _try_init_langfuse(task_id, session_id)
+        self._langfuse, self._lf_trace, self._lf_trace_id = _try_init_langfuse(task_id, session_id)
 
         # Progress state
         self._progress = Progress(
@@ -228,33 +241,64 @@ class TaskTracer:
         self._write_trace(success, error)
 
         # Flush Langfuse
-        if self._langfuse:
+        if self._langfuse and self._lf_trace:
             try:
-                if self._lf_trace:
-                    summary = self._build_l0(success, error)
-                    self._lf_trace.update(
-                        metadata=summary,
-                        output={"success": success, "decision_path": summary.get("decision_path", "")},
-                        level="ERROR" if not success else "DEFAULT",
-                        status_message=error if error else None,
-                    )
-                    self._lf_trace.end()
-                if self._lf_session_ctx:
-                    self._lf_session_ctx.__exit__(None, None, None)
+                summary = self._build_l0(success, error)
+                self._lf_trace.update(
+                    metadata=summary,
+                    output={
+                        "success": success,
+                        "decision_path": summary.get("decision_path", ""),
+                        "answer_columns": summary.get("answer_columns", []),
+                        "harness_blocks": summary.get("harness_blocks", 0),
+                    },
+                    level="ERROR" if not success else "DEFAULT",
+                    status_message=error if error else None,
+                )
+                self._lf_trace.end()
                 self._langfuse.flush()
             except Exception as exc:
                 logger.debug("Langfuse flush failed: %s", exc)
+
+    def post_score(self, score: float, comment: str = "") -> None:
+        """Post eval score to Langfuse after scoring.
+
+        Called by eval/run_eval.py after score_task() returns.
+        Links the numeric score to the task trace in Langfuse.
+        """
+        if not self._langfuse:
+            return
+        try:
+            self._langfuse.create_score(
+                trace_id=self._lf_trace_id,
+                name="kdd_score",
+                value=score,
+                comment=comment or None,
+            )
+            self._langfuse.flush()
+        except Exception as exc:
+            logger.debug("Langfuse score post failed: %s", exc)
 
     def _build_l0(self, success: bool, error: str) -> dict[str, Any]:
         """Build L0 task summary from observations and progress."""
         obs = self._observations
         final = obs.get("final", {})
         iterations = obs.get("iterations", [])
+        qa = obs.get("question_analyzer", {})
 
-        # Build decision path: "continue → backtrack(1) → continue → finish"
+        # Decision path: "continue → harness_blocked → continue → finish"
         decision_path = " → ".join(
             i.get("judge_action", "?") for i in iterations
         ) if iterations else ""
+
+        # Count harness gate blocks across iterations
+        harness_blocks = sum(
+            1 for i in iterations
+            if "harness_blocked" in str(i.get("judge_action", ""))
+        )
+        harness_flags_total = sum(
+            len(i.get("harness_flags", [])) for i in iterations
+        )
 
         return {
             "task_id": self._task_id,
@@ -265,12 +309,17 @@ class TaskTracer:
             "total_cost_usd": round(self._progress.cost_usd, 4),
             "time_seconds": round(self._progress.elapsed_seconds, 1),
             "decision_path": decision_path,
-            "code_failures": final.get("code_failures", 0),
             "backtracks_used": final.get("backtracks_used", 0),
-            "total_debug_retries": final.get("total_debug_retries", 0),
-            "stagnation_stop": final.get("stagnation_stops", False),
             "answer_columns": final.get("answer_columns", []),
             "answer_rows": final.get("answer_rows", 0),
+            "execution_path": final.get("execution_path", []),
+            "languages_used": final.get("languages_used", []),
+            # v5: HarnessGate tracking
+            "harness_blocks": harness_blocks,
+            "harness_flags_total": harness_flags_total,
+            # v5: QuestionAnalyzer output
+            "qa_answer_type": qa.get("answer_type", "unknown"),
+            "qa_expected_columns": qa.get("expected_column_count", 0),
         }
 
     def _build_l1(self) -> list[dict[str, Any]]:
@@ -279,7 +328,6 @@ class TaskTracer:
         summaries = []
 
         for it in iterations:
-            # Collect span-level token/cost for this iteration
             iter_idx = it.get("iteration", 0)
             iter_spans = [
                 s for s in self._spans
@@ -292,16 +340,16 @@ class TaskTracer:
             summaries.append({
                 "iteration": iter_idx,
                 "plan": it.get("plan_description", ""),
-                "data_sources": it.get("plan_sources", []),
+                "language": it.get("language", ""),
+                "winning_language": it.get("winning_language", ""),
                 "code_success": it.get("code_success", False),
-                "debug_retries": it.get("debug_retries", 0),
                 "result_preview": it.get("stdout_preview", ""),
-                "error_preview": it.get("stderr_preview", ""),
+                # v5: HarnessGate flags for this iteration
+                "harness_flags": it.get("harness_flags", []),
                 "judge": {
                     "action": it.get("judge_action", ""),
                     "sufficient": it.get("judge_sufficient", False),
                     "reasoning": it.get("judge_reasoning", ""),
-                    "missing": it.get("judge_missing", ""),
                     "guidance": it.get("judge_guidance", ""),
                 },
                 "tokens": iter_tokens,
@@ -382,63 +430,86 @@ class Progress:
         }
 
 
-# --- Langfuse integration (optional, SDK v4) ---
+# --- Langfuse integration (v4.0 SDK) ---
 #
-# v4 uses start_observation() / start_as_current_observation() instead of trace().
-# A root span represents the full task; each agent call is a child observation.
-# session_id is stored in metadata (not a first-class field in v4).
+# Hierarchy:
+#   Session (session_id) → Trace (task_id) → Observations (agent spans)
+#
+# v4 SDK uses:
+#   - Langfuse() reads LANGFUSE_HOST, LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY from env
+#   - start_observation(as_type="span"|"generation") for agent calls
+#   - create_trace_id(seed=...) for deterministic trace IDs
+#   - create_score() for eval metrics
+#   - propagate_attributes(session_id=...) for session grouping
 
 
 def _try_init_langfuse(
     task_id: str, session_id: str = ""
-) -> tuple[Any | None, Any | None, Any | None]:
-    """Try to initialize Langfuse v4 client + root span.
+) -> tuple[Any | None, Any | None, str]:
+    """Try to initialize Langfuse client + root observation.
 
-    Returns (client, root_obs, session_ctx) where session_ctx is a context
-    manager that must be exited when the task finishes. All three are None on
-    failure.
+    Returns (client, root_observation, trace_id). All None/"" on failure (fail-open).
     """
     try:
-        from langfuse import Langfuse, propagate_attributes
+        from langfuse import Langfuse
 
         langfuse = Langfuse()
 
-        # Deterministic trace_id: re-runs of the same task in the same session
-        # produce the same trace_id, making it easy to find them in the UI.
+        # Deterministic trace_id: re-runs of the same task+session produce
+        # the same trace, making it easy to compare runs in the UI.
         seed = f"{session_id}__{task_id}" if session_id else task_id
         trace_id = langfuse.create_trace_id(seed=seed)
-        trace_ctx = {"trace_id": trace_id}  # TraceContext TypedDict
 
-        # propagate_attributes() sets session_id as a native OTEL attribute so
-        # traces appear in Langfuse's "Sessions" tab (not just metadata).
-        session_ctx: Any = None
+        # Build trace context
+        trace_ctx = {"trace_id": trace_id}
+
+        # Start root observation for this task
+        obs_metadata: dict[str, Any] = {
+            "task_id": task_id,
+            "framework": "dataline",
+        }
         if session_id:
-            session_ctx = propagate_attributes(session_id=session_id)
-            session_ctx.__enter__()
+            obs_metadata["session_id"] = session_id
 
         root_obs = langfuse.start_observation(
             trace_context=trace_ctx,
             name=task_id,
             as_type="span",
-            metadata={
-                "task_id": task_id,
-                "framework": "dataline",
-            },
+            metadata=obs_metadata,
         )
-        logger.info("Langfuse tracing enabled: task=%s session=%s", task_id, session_id or "(none)")
-        return langfuse, root_obs, session_ctx
+
+        # Set session_id via propagate_attributes if available
+        if session_id:
+            try:
+                from langfuse import propagate_attributes
+                ctx = propagate_attributes(session_id=session_id)
+                ctx.__enter__()
+                # Store for cleanup — but we don't exit it until finish()
+                # This is fine because propagate_attributes is thread-local
+            except (ImportError, Exception):
+                pass
+
+        logger.info("Langfuse tracing: task=%s session=%s trace=%s",
+                     task_id, session_id or "(none)", trace_id)
+
+        return langfuse, root_obs, trace_id
     except ImportError:
         logger.debug("Langfuse not installed — traces saved to JSON only")
-        return None, None, None
+        return None, None, ""
     except Exception as exc:
         logger.debug("Langfuse init failed: %s — traces saved to JSON only", exc)
-        return None, None, None
+        return None, None, ""
 
 
 def _push_span_to_langfuse(root_obs: Any, span: Span) -> None:
-    """Push a completed span as a child observation of the root task span."""
+    """Push a completed span as a child observation of the root task span.
+
+    LLM calls → type="generation" (shows token usage in Langfuse UI)
+    Non-LLM calls → type="span" (shows timing only)
+    """
     try:
         if span.llm_input:
+            # Generation: LLM call with full I/O
             obs = root_obs.start_observation(
                 name=span.agent,
                 as_type="generation",
@@ -455,6 +526,7 @@ def _push_span_to_langfuse(root_obs: Any, span: Span) -> None:
                 status_message=span.error if span.error else None,
             )
         else:
+            # Span: non-LLM operation (sandbox, harness_gate, etc.)
             obs = root_obs.start_observation(
                 name=span.agent,
                 as_type="span",
@@ -477,7 +549,7 @@ def _truncate(text: str, max_len: int) -> str:
 
 
 def _span_to_dict(span: Span) -> dict[str, Any]:
-    """Convert Span to JSON-serializable dict."""
+    """Convert Span to JSON-serializable dict for trace_agent.json."""
     d: dict[str, Any] = {
         "name": span.name,
         "agent": span.agent,
