@@ -446,6 +446,7 @@ def run_task(
                 question, steps_done, traced_llm,
                 state=state, cm=cm, benchmark=benchmark,
                 guidelines=guidelines,
+                question_spec=question_spec,
             )
         _log(trace, "finalizer", f"Answer columns: {list(answer.keys())}")
 

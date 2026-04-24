@@ -206,6 +206,32 @@ Next meaningful changes must either: (a) target ≥5 tasks, or (b) use repeated 
 
 ---
 
+## v6 — Candidate Consensus (Full Execution + Disagreement Signal) — REVERTED (2026-04-24)
+
+**Changes from v5i:**
+- Orchestrator: run ALL code candidates (not break-on-first-success)
+- Compare structured answers across successful candidates
+- Disagreement → WARN flag injected into Judge context
+- Agreement → logged as confirmation
+
+**Hypothesis:** Running all candidates and comparing answers would catch computation errors through disagreement signal.
+
+**Result: 27/47 = 57.4% (identical to v5i on matched tasks) — REVERTED**
+- 3 tasks stuck (task_330/418/75 — infrastructure, likely API timeout from increased load)
+- Gained (+4): task_27, task_283, task_352, task_420 (all LLM variance)
+- Lost (-4): task_214, task_24, task_25, task_250 (all LLM variance)
+
+**Why it failed:**
+- Consensus signal fired on only 3/47 tasks — candidates almost never both succeed
+- When 2+ candidates succeed, they agree (0 disagreements detected)
+- In v5i historical data: only 5/44 second-candidate attempts succeeded
+- Root cause: candidate parsing issues (LLM markdown leaks into code) + most tasks generate only 1 candidate
+- Added execution cost with zero signal value
+
+**Key learning:** Multi-candidate voting requires high candidate success rate to be useful. With current ~11% 2nd-candidate success rate, this approach is dead on arrival. To make it viable would require: (a) fixing candidate parsing, (b) prompting for more independent candidates, (c) using completely separate LLM calls per candidate (like Best-of-N). Not worth the complexity at this stage.
+
+---
+
 ## Baseline (v4, pre-2026-04-23)
 
 **Architecture:** Profiler → Analyzer → Loop(PlannerCoder → Sandbox → Skeptic → Judge) → Finalizer

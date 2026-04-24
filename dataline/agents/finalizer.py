@@ -13,7 +13,7 @@ from ..core.context_manager import ContextManager, Section
 from ..core.llm_client import LLMClient
 
 from ..core.token_estimator import cap_text
-from ..core.types import AnalysisState, StepRecord
+from ..core.types import AnalysisState, QuestionSpec, StepRecord
 
 def format_answer(
     question: str,
@@ -21,6 +21,7 @@ def format_answer(
     llm: LLMClient,
     *,
     state: AnalysisState | None = None,
+    question_spec: QuestionSpec | None = None,
     cm: ContextManager | None = None,
     benchmark: str = "kdd",
     guidelines: str = "",
@@ -33,7 +34,7 @@ def format_answer(
     """
     if benchmark == "dabstep":
         return _format_dabstep(question, steps_done, llm, state=state, cm=cm, guidelines=guidelines)
-    return _format_kdd(question, steps_done, llm, state=state, cm=cm)
+    return _format_kdd(question, steps_done, llm, state=state, cm=cm, question_spec=question_spec)
 
 
 def _format_kdd(
@@ -43,6 +44,7 @@ def _format_kdd(
     *,
     state: AnalysisState | None = None,
     cm: ContextManager | None = None,
+    question_spec: QuestionSpec | None = None,
 ) -> dict:
     """KDD table-format answer.
 
@@ -54,7 +56,7 @@ def _format_kdd(
     # --- Path 1: structured output from save_result() ---
     structured = _try_structured_extract(state)
     if structured is not None:
-        return structured
+        return _trim_extra_columns(structured, question_spec, question)
 
     # --- Path 2: LLM formatting ---
     prompt_path = Path(__file__).parent.parent / "prompts" / "finalizer.md"
@@ -235,6 +237,57 @@ def _has_stdout_leak(answer: dict) -> bool:
                 return True
     return False
 
+
+
+_ID_SUFFIX_RE = re.compile(r"(?i)^.+[_]?id$|^index$|^rowid$|^row_id$|^row_number$")
+
+
+def _trim_extra_columns(
+    answer: dict,
+    spec: QuestionSpec | None,
+    question: str = "",
+) -> dict:
+    """Drop extra join-key/ID columns when QuestionSpec expects fewer columns.
+
+    Conservative strategy: only drops columns whose name matches an ID pattern
+    (ends with _id/ID, or is "index"/"rowid") AND whose name does NOT appear
+    as a keyword in the question. This avoids false positives where the question
+    actually asks for an ID column (e.g. "List the transaction IDs").
+
+    Fail-open: returns original answer if not enough ID columns can be identified.
+    """
+    if spec is None or spec.expected_column_count <= 0:
+        return answer
+    expected = spec.expected_column_count
+    actual = len(answer)
+    if actual <= expected:
+        return answer
+
+    q_lower = question.lower()
+    to_drop = actual - expected
+
+    # Identify droppable columns: ID-like name + NOT mentioned in question
+    droppable: list[str] = []
+    for col_name in answer:
+        if not _ID_SUFFIX_RE.match(col_name):
+            continue
+        # Check if column name (or its stem) appears in the question
+        col_stem = col_name.lower().replace("_id", "").replace("id", "").strip("_")
+        if col_stem and len(col_stem) >= 3 and col_stem in q_lower:
+            continue  # Question mentions this entity — keep it
+        droppable.append(col_name)
+
+    if len(droppable) < to_drop:
+        return answer
+
+    # Drop the first `to_drop` ID columns (order preserves original dict order)
+    drop_set = set(droppable[:to_drop])
+    trimmed = {k: v for k, v in answer.items() if k not in drop_set}
+    logger.info(
+        "Column trim: dropped %s (spec expected %d cols, had %d)",
+        drop_set, expected, actual,
+    )
+    return trimmed
 
 
 def _try_direct_scalar_extract(

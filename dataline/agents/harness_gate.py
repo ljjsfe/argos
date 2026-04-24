@@ -376,7 +376,7 @@ def _check_extra_columns(
 # ---------------------------------------------------------------------------
 
 _PLACEHOLDER_PATTERNS = [
-    r"^not applicable$", r"^n/?a$", r"^none$", r"^null$",
+    r"^not applicable$", r"^n/?a$", r"^none$", r"^null$", r"^nan$",
     r"^\[\s*\]$", r"^\{\s*\}$", r"^$",
 ]
 
@@ -477,6 +477,53 @@ def _check_dict_string_answer(structured_json: str) -> list[HarnessFlag]:
                     ),
                 )]
     return []
+
+
+# ---------------------------------------------------------------------------
+# Rule 8c: NaN / null value detection
+# ---------------------------------------------------------------------------
+
+_NAN_STRINGS = {"nan", "none", "null", "nat", "<na>", ""}
+
+
+def _check_nan_values(structured_json: str) -> list[HarnessFlag]:
+    """Rule 8c: block answers that contain NaN/null values.
+
+    A NaN in a structured answer almost always means the computation failed
+    silently (e.g. missing join key, wrong column name, division by zero).
+    """
+    if not structured_json:
+        return []
+    try:
+        data = json.loads(structured_json)
+        answer = data.get("answer", {})
+        if not isinstance(answer, dict):
+            return []
+    except (json.JSONDecodeError, ValueError):
+        return []
+
+    nan_cols: list[str] = []
+    for col, vals in answer.items():
+        if not isinstance(vals, list):
+            vals = [vals]
+        for v in vals:
+            if str(v).strip().lower() in _NAN_STRINGS:
+                nan_cols.append(col)
+                break
+
+    if not nan_cols:
+        return []
+
+    return [HarnessFlag(
+        rule="nan_answer",
+        severity="block",
+        message=(
+            f"Answer contains NaN/null values in column(s): {nan_cols}. "
+            f"This usually means a join returned no matches, a column name "
+            f"was wrong, or a computation produced NaN. Check your data "
+            f"loading and computation logic."
+        ),
+    )]
 
 
 # ---------------------------------------------------------------------------
@@ -833,6 +880,7 @@ def check(
     flags.extend(_check_extra_columns(question, structured_json))
     flags.extend(_check_empty_answer(question, structured_json))
     flags.extend(_check_dict_string_answer(structured_json))
+    flags.extend(_check_nan_values(structured_json))
     flags.extend(_check_value_embellishment(structured_json))
 
     # Rules 10-13: QA rules (only if spec has non-unknown values)
