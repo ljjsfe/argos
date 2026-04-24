@@ -118,6 +118,14 @@ When there is one clear best approach, ONE candidate is sufficient.
 
 Candidates are tried in order. First successful execution wins.
 
+### Heterogeneous source strategy (IMPORTANT)
+
+If the task contains **both** `.db`/`.sqlite` files **and** `.csv`/`.json` files:
+- Use **SQL** for the structured database tables (joins, filters, aggregations)
+- Use **Python** for CSV/JSON loading and final merge with SQL results
+- List a **Mixed candidate set**: SQL first for the .db tables, Python as fallback
+- Reason: SQL handles relational joins more reliably; Python handles flat-file parsing and cross-source merging
+
 ## Defensive Patterns
 
 1. **Always verify columns exist** before using them

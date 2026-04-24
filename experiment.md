@@ -44,7 +44,32 @@ HarnessGate blocks prevent Judge from seeing garbage results, saving LLM budget.
 
 **Token cost per task:** ~$0.4-0.6, ~2-3min/task → 50 tasks ≈ $25, ~2.5h
 
-**Eval:** Not yet run on v5.
+**v5 Baseline eval (2026-04-23): 26/50 = 52%**
+- easy 10/15, medium 11/23, hard 5/11
+- Cost: $29.38, avg $0.59/task
+
+---
+
+## v5c — P0 + P1a + P2 (2026-04-23)
+
+**Changes:**
+- P0: HarnessGate `qa_row_count`/`output_shape` skip when structured_json absent (no stdout fallback)
+- P1a: Judge prompt — B1 result count plausibility, B2 tie awareness, B3 format/unit check; iter-0 more skeptical
+- P2: PlannerCoder prompt — heterogeneous source Mixed strategy hint (.db + .csv → prefer mixed candidates)
+
+**Result: 28/50 = 56.8% (+4.8%)**
+- easy 10/15 (flat), medium 14/23 (+3), hard 4/11 (-1)
+- Net: +6 gained, -2 lost
+- Cost: $34.21, avg $0.68/task (tokens up due to more iterations)
+
+**Gained:** task_243, task_249, task_250, task_283 (full), task_38/task_259 (partial)
+**Lost:** task_196 (P1a B3 made it re-compute correct answer → wrong), task_330 (P1a made it merge correct two-column answer → wrong format)
+
+**Key insight:** P1a is double-edged — helps first-iter false-finishes but breaks correct first-iter answers. P0 and P2 are clean wins with no regression. Core remaining problem (22 failures) is wrong_computation — LLM doesn't understand data semantics (units, column meaning, aggregation grain).
+
+**Next: P1b — Analyzer semantic layer to fix wrong_computation root cause.**
+
+**Eval:** Not yet run on P1b.
 
 ---
 

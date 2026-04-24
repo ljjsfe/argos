@@ -87,36 +87,44 @@ def _count_data_lines(stdout: str) -> int:
     return len(lines)
 
 
-def _count_answer_rows(structured_json: str, stdout: str) -> int:
-    """Count answer rows preferring structured_json over stdout line counting.
+def _count_answer_rows(structured_json: str) -> int | None:
+    """Count answer rows from structured_json only.
 
-    stdout line counting is unreliable — agents print many diagnostic lines.
-    structured_json reflects the actual answer shape.
+    Returns None if structured_json is absent or unparseable — callers must
+    handle None by skipping the rule rather than falling back to stdout.
+    stdout line counting is fundamentally unreliable: agents print many
+    diagnostic lines that are not part of the answer.
     """
-    if structured_json:
-        try:
-            data = json.loads(structured_json)
-            answer = data.get("answer", {})
-            if isinstance(answer, dict) and answer:
-                lengths = [len(v) for v in answer.values() if isinstance(v, list)]
-                if lengths:
-                    return lengths[0]
-        except (json.JSONDecodeError, ValueError):
-            pass
-    return _count_data_lines(stdout)
+    if not structured_json:
+        return None
+    try:
+        data = json.loads(structured_json)
+        answer = data.get("answer", {})
+        if isinstance(answer, dict) and answer:
+            lengths = [len(v) for v in answer.values() if isinstance(v, list)]
+            if lengths:
+                return lengths[0]
+    except (json.JSONDecodeError, ValueError):
+        pass
+    return None
 
 
 def _check_output_shape(question: str, stdout: str, structured_json: str) -> list[HarnessFlag]:
     q_lower = question.lower()
     if not any(re.search(p, q_lower) for p in _SCALAR_PATTERNS):
         return []
-    data_rows = _count_answer_rows(structured_json, stdout)
+    data_rows = _count_answer_rows(structured_json)
+    # Only fire when we have a reliable row count from structured output.
+    # If structured_json is absent (agent still exploring), skip — stdout
+    # line counts are too noisy to be useful here.
+    if data_rows is None:
+        return []
     if data_rows > 5:
         return [HarnessFlag(
             rule="output_shape",
             severity="block",
             message=(
-                f"Scalar question but output has {data_rows} answer rows. "
+                f"Scalar question but answer has {data_rows} rows. "
                 f"Expected a single aggregated value. Add aggregation "
                 f"(COUNT/SUM/AVG/MIN/MAX) to reduce to one row."
             ),
@@ -521,16 +529,23 @@ def _check_qa_row_count(
     stdout: str,
     structured_json: str,
 ) -> list[HarnessFlag]:
-    """Rule 11: row count vs QA expectation."""
+    """Rule 11: row count vs QA expectation.
+
+    Only fires when structured_json is present and parseable. Without it we
+    cannot reliably distinguish answer rows from diagnostic print lines.
+    """
     if spec.expected_row_count == "unknown":
         return []
-    data_rows = _count_answer_rows(structured_json, stdout)
+    data_rows = _count_answer_rows(structured_json)
+    if data_rows is None:
+        # No structured output yet — agent still exploring. Skip.
+        return []
     if spec.expected_row_count == "single" and data_rows > 5:
         return [HarnessFlag(
             rule="qa_row_count",
             severity="block",
             message=(
-                f"Expected single-row answer but output has {data_rows} rows. "
+                f"Expected single-row answer but answer has {data_rows} rows. "
                 f"Add aggregation to reduce to one result."
             ),
         )]
@@ -539,7 +554,7 @@ def _check_qa_row_count(
             rule="qa_row_count",
             severity="warn",
             message=(
-                "Expected multiple rows but output has only 1 row. "
+                "Expected multiple rows but answer has only 1 row. "
                 "Verify the query isn't over-aggregating."
             ),
         )]

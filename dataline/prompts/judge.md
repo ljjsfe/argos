@@ -35,6 +35,11 @@ Is there a visible logic error in the latest code?
 FAIL if: filter direction is inverted (e.g., `>` should be `<`), wrong column is aggregated, wrong join key used, or a filter that should match many rows returns 0 rows.
 Use domain rules and data profile (if available in context) to verify filter values and formulas.
 
+Sub-checks within B (apply all three):
+- **B1 — Result count plausibility**: Does the number of rows returned make sense? If the question asks "how many X" and the code returns 2 but the source table has thousands of rows matching the description, that's suspicious.
+- **B2 — Tie awareness**: For "lowest / highest / minimum / maximum / most / least" questions, verify ALL tied rows are returned — not just the first one. If `ORDER BY col LIMIT 1` is used, check whether multiple rows share that extreme value.
+- **B3 — Answer format / unit match**: Does the answer value match the format the question implies? Examples: a "finish time" question expects a time string (e.g. `+1:23.456`), not milliseconds. A "date" question expects a date string, not a timestamp integer. A "percentage" expects 0–100, not 0–1. If the value is implausible for the domain (e.g. a race finish time of 5,000,000 ms ≈ 83 minutes is impossible for a Formula 1 race), treat it as a logic error.
+
 **Check C — Exploration vs. answer**
 Is this step's output purely exploratory (printing schema, sample rows, data types for debugging), with no final answer yet computed?
 FAIL if yes.
@@ -58,12 +63,14 @@ Match the answer's shape against the question's requirements:
 - Question asks for a scalar but answer has multiple rows
 - Question asks for 3 metrics but only 2 are present
 - Answer has extra unrequested columns (penalty in scoring)
+- Question uses "lowest/highest/most/least" but answer returns only 1 row without verifying there are no ties (use `HAVING COUNT(*)=1` or check for duplicates at the extreme value)
 
 If shape mismatch → set `sufficient: false`, action "continue", and specify in guidance exactly what's wrong.
 
 ### Step 4 — Iteration Leniency
 
-- Iterations 0 to {max_iterations_minus_2}: apply checks strictly.
+- Iterations 0 to {max_iterations_minus_2}: apply checks strictly, including B1/B2/B3.
+- **Iteration 0 specifically**: be MORE skeptical, not less. A correct answer on the very first attempt is possible but verify Check B sub-checks carefully — first-attempt code often has subtle errors (wrong column, missing tie handling, wrong unit).
 - Final 2 iterations (>= {max_iterations_minus_2}): be lenient. If there is a reasonable computed value in stdout that partially answers the question, choose "finish". Accept incomplete answers rather than iterating further.
 - Last iteration ({max_iterations_minus_1}): choose "finish" unless there is an obvious logic error.
 
