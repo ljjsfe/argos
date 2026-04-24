@@ -36,9 +36,16 @@ FAIL if: filter direction is inverted (e.g., `>` should be `<`), wrong column is
 Use domain rules and data profile (if available in context) to verify filter values and formulas.
 
 Sub-checks within B (apply all three):
-- **B1 — Result count plausibility**: Does the number of rows returned make sense? If the question asks "how many X" and the code returns 2 but the source table has thousands of rows matching the description, that's suspicious.
-- **B2 — Tie awareness**: For "lowest / highest / minimum / maximum / most / least" questions, verify ALL tied rows are returned — not just the first one. If `ORDER BY col LIMIT 1` is used, check whether multiple rows share that extreme value.
-- **B3 — Answer format / unit match**: Does the answer value match the format the question implies? Examples: a "finish time" question expects a time string (e.g. `+1:23.456`), not milliseconds. A "date" question expects a date string, not a timestamp integer. A "percentage" expects 0–100, not 0–1. If the value is implausible for the domain (e.g. a race finish time of 5,000,000 ms ≈ 83 minutes is impossible for a Formula 1 race), treat it as a logic error.
+- **B1 — Result count plausibility**: Only check structural contradictions that can be inferred from the question text alone — do NOT estimate how many data records should match a filter condition (you cannot see the data).
+  - FAIL if: question asks for a scalar ("how many", "what is the total/average") but result has multiple rows — that is a shape error, not a value.
+  - FAIL if: question explicitly asks for "top N" / "bottom N" (e.g. "top 3 cities") and result has significantly more than N rows with no obvious tie explanation.
+  - DO NOT FAIL based on your own estimate of "how many rows should exist" in the data. If the question asks "which patients have condition X" and the code returns 3 rows, that may be exactly correct — you have no way to verify the expected count without running the query yourself.
+  - **Grounding rule**: Any specific count you cite (e.g. "18 records exist") MUST come from an explicit number in the Data Profile or the current stdout. If no such number is present in the context, you cannot make a count claim — write "count unknown from context" and do not fail on this basis.
+- **B2 — Tie awareness**: For "lowest / highest / minimum / maximum / most / least" questions, check whether `ORDER BY col LIMIT 1` is used without a tie-check. Do NOT fail automatically — instead, if ties are possible, add a note in `guidance_for_next_step` to verify (e.g. "verify no other rows share this extreme value"). Only set `sufficient: false` if the code provably returns fewer results than it should (e.g. LIMIT 1 when question asks for "all" tied values).
+- **B3 — Answer format / unit match**: Only flag this if there is a specific, detectable signal:
+  - Time/duration question (question contains "time", "duration", "lap", "finish") AND answer is a large integer (> 100,000) — likely milliseconds instead of a formatted time string.
+  - Percentage question (question contains "percentage", "%" , "rate", "proportion") AND answer is outside [0, 100] — likely a 0–1 fraction.
+  Do NOT apply B3 to other cases. Do NOT infer unit issues from vague "implausibility" — if the value is a plausible number for the domain, do not flag it.
 
 **Check C — Exploration vs. answer**
 Is this step's output purely exploratory (printing schema, sample rows, data types for debugging), with no final answer yet computed?
@@ -63,14 +70,16 @@ Match the answer's shape against the question's requirements:
 - Question asks for a scalar but answer has multiple rows
 - Question asks for 3 metrics but only 2 are present
 - Answer has extra unrequested columns (penalty in scoring)
-- Question uses "lowest/highest/most/least" but answer returns only 1 row without verifying there are no ties (use `HAVING COUNT(*)=1` or check for duplicates at the extreme value)
+
+**Guidance only (do NOT fail automatically)**:
+- Question uses "lowest/highest/most/least" and answer returns 1 row: add a note in `guidance_for_next_step` to verify ties. Do not fail if the result otherwise looks correct.
 
 If shape mismatch → set `sufficient: false`, action "continue", and specify in guidance exactly what's wrong.
 
 ### Step 4 — Iteration Leniency
 
 - Iterations 0 to {max_iterations_minus_2}: apply checks strictly, including B1/B2/B3.
-- **Iteration 0 specifically**: be MORE skeptical, not less. A correct answer on the very first attempt is possible but verify Check B sub-checks carefully — first-attempt code often has subtle errors (wrong column, missing tie handling, wrong unit).
+- **Iteration 0 specifically**: apply all checks normally. Only be extra skeptical if the answer shape clearly mismatches the QuestionSpec (e.g., QuestionSpec says "multiple rows" but output has 1 row, or QuestionSpec says "scalar" but output has a table). Do NOT apply extra skepticism just because it's the first attempt — correct first-attempt answers are common and should be accepted.
 - Final 2 iterations (>= {max_iterations_minus_2}): be lenient. If there is a reasonable computed value in stdout that partially answers the question, choose "finish". Accept incomplete answers rather than iterating further.
 - Last iteration ({max_iterations_minus_1}): choose "finish" unless there is an obvious logic error.
 

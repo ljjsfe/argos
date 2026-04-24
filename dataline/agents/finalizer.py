@@ -192,11 +192,15 @@ def _try_structured_extract(state: AnalysisState | None) -> dict | None:
         answer = {k: v for k, v in answer.items() if k.lower() not in _METADATA_KEYS}
         if not answer:
             continue
+        # Normalize: scalar values → single-element lists so downstream is uniform
+        answer = {
+            k: v if isinstance(v, list) else [v]
+            for k, v in answer.items()
+        }
         # Validate: all values must be lists of the same length
-        if all(isinstance(v, list) for v in answer.values()):
-            lengths = {len(v) for v in answer.values()}
-            if len(lengths) == 1:
-                return answer
+        lengths = {len(v) for v in answer.values()}
+        if len(lengths) == 1:
+            return answer
     return None
 
 

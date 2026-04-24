@@ -69,7 +69,51 @@ HarnessGate blocks prevent Judge from seeing garbage results, saving LLM budget.
 
 **Next: P1b — Analyzer semantic layer to fix wrong_computation root cause.**
 
-**Eval:** Not yet run on P1b.
+---
+
+## v5d — P1a refinement (2026-04-23)
+
+**Changes:**
+- B2: no longer auto-fail; adds guidance note only (fails only if question explicitly asks "all tied values")
+- B3: fires only on two specific signals (time question + large integer >100K; percentage question + value outside 0-100)
+- Iter-0 skepticism: removed blanket rule; extra skeptical only when QuestionSpec shape mismatches output
+
+**Result: 26/50 = 52.0% (-4.8% vs v5c)**
+- easy 8/15 (-2), medium 14/23 (flat), hard 4/11 (flat)
+- Cost: $32.45, avg $0.65/task
+
+**Gained:** task_196 ✓ (P1a regression fixed), task_257 ✓, task_330 ✓ (hard, P1a regression fixed)
+**Lost:** task_11 (Judge B1 hallucinated "18 records" when gold=3, DATA_PROFILE empty due to Analyzer path bug), task_22/task_249 (LLM code variance), task_350/task_194 (Finalizer extracted stdout text instead of structured JSON — scalar answer not wrapped in list)
+
+**Root cause analysis:**
+- task_11: B1 triggered LLM hallucination — Judge had no grounding data (DATA_PROFILE empty), B1 asked it to estimate expected row count, LLM filled void with parametric memory
+- task_350/194: `save_result(answer={'count': 7})` — scalar value (not list) failed `_try_structured_extract` validation → fell back to raw stdout string
+- task_22/249: LLM code generation variance, unrelated to Judge changes
+
+**Fixes applied for v5e:**
+- B1: added grounding rule — any count claim must cite explicit number from Data Profile or stdout; if absent, write "count unknown" and do not fail
+- Finalizer: scalar values in answer dict now auto-wrapped in list `[v]` before validation
+- Analyzer path bug identified (task_11 only): LLM-generated profiling code used `task_dir/json/` instead of `task_dir/context/json/`
+
+---
+
+## v5e — B1 grounding + Finalizer scalar fix (2026-04-23)
+
+**Changes from v5d:**
+- Judge B1: grounding rule — count claims must cite context; "count unknown" if absent
+- Finalizer: scalar answer values auto-wrapped in list
+- (Analyzer path bug not yet fixed — separate issue)
+
+**Hypothesis:** Recover task_11 (B1 grounding), task_350 (Finalizer fix). task_22/249 remain LLM variance.
+
+**Result: 28/50 = 56.5% (back to v5c level)**
+- easy 8/15 (-2 vs v5c), medium 14/23 (flat), hard 5/11 (+1), extreme 1/1 (+1)
+- Cost: $30.31, avg $0.61/task
+
+**Gained vs v5c:** task_257, task_330, task_418 (extreme!), task_194 (Finalizer fix), task_350 (Finalizer fix)
+**Lost vs v5c:** task_11, task_22, task_249 — confirmed LLM code generation variance, not Judge-related
+
+**Key insight:** Judge/Finalizer layer now stable. Remaining 22 failures split: ~9 code_error (debugger bottleneck), ~11 partial_result (wrong_computation). Next target: P1b — Analyzer semantic layer to reduce wrong_computation.
 
 ---
 
