@@ -103,13 +103,15 @@ class QuestionSpec:
     """Structured shape specification inferred from the question.
 
     Produced by QuestionAnalyzer (one LLM call before the loop).
-    Consumed by HarnessGate (Rules 10-13) and PlannerCoder (guidance).
+    Consumed by HarnessGate (Rules 10-14) and PlannerCoder (guidance).
     Fail-open: unknown values cause QA rules to skip silently.
     """
     answer_type: str = "unknown"           # "scalar" | "list" | "table" | "unknown"
     expected_column_count: int = 0         # 0 = unknown
-    expected_row_count: str = "unknown"    # "single" | "multiple" | "unknown"
+    expected_row_count: str = "unknown"    # "single" | "multiple" | "one_or_more" | "unknown"
     value_style: str = "unknown"           # "numeric" | "exact_term" | "name" | "mixed" | "unknown"
+    tie_possible: bool = False             # True when min/max/lowest/highest — result may have ties
+    computation_type: str = "unknown"      # "ratio" | "difference" | "count" | "aggregate" | "lookup" | "unknown"
     notes: str = ""                        # semantic interpretation (trace only, NOT injected into prompt)
 
     def to_guidance(self) -> str:
@@ -119,10 +121,21 @@ class QuestionSpec:
             parts.append(f"Expected answer shape: {self.answer_type}")
         if self.expected_column_count > 0:
             parts.append(f"Expected column count: {self.expected_column_count}")
-        if self.expected_row_count != "unknown":
+        if self.expected_row_count not in ("unknown", "single"):
             parts.append(f"Expected row count: {self.expected_row_count}")
+        elif self.expected_row_count == "single" and not self.tie_possible:
+            parts.append(f"Expected row count: single")
         if self.value_style != "unknown":
             parts.append(f"Value style: {self.value_style}")
+        if self.tie_possible:
+            parts.append(
+                "Tie-possible: YES — use WHERE col = (SELECT MIN/MAX ...) or RANK(), "
+                "NOT LIMIT 1. Multiple rows may share the extreme value."
+            )
+        if self.computation_type == "ratio":
+            parts.append(
+                "Computation type: RATIO — compute X / Y (division), not X - Y (difference)."
+            )
         return "\n".join(parts) if parts else ""
 
 

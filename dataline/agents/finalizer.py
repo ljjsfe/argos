@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from ..core.context_manager import ContextManager, Section
 from ..core.llm_client import LLMClient
@@ -199,9 +202,38 @@ def _try_structured_extract(state: AnalysisState | None) -> dict | None:
         }
         # Validate: all values must be lists of the same length
         lengths = {len(v) for v in answer.values()}
-        if len(lengths) == 1:
-            return answer
+        if len(lengths) != 1:
+            continue
+
+        # Stdout leak guard: reject if any value contains newlines or is very long
+        # (indicates save_result() was called with raw stdout instead of structured data)
+        if _has_stdout_leak(answer):
+            logger.warning(
+                "Structured extract rejected for step %d: "
+                "answer values contain newlines or are >300 chars (stdout leak). "
+                "Trying earlier step.",
+                step.step_index,
+            )
+            continue
+
+        return answer
     return None
+
+
+def _has_stdout_leak(answer: dict) -> bool:
+    """Detect if answer values contain leaked stdout (multi-line debug strings).
+
+    A legitimate answer value is a short scalar or a compact identifier.
+    If a value contains newlines or exceeds 300 characters, it was almost
+    certainly captured from raw stdout rather than a structured computation.
+    """
+    for vals in answer.values():
+        if not isinstance(vals, list):
+            continue
+        for v in vals:
+            if isinstance(v, str) and ("\n" in v or len(v) > 300):
+                return True
+    return False
 
 
 

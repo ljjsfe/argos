@@ -565,7 +565,11 @@ def _check_qa_answer_type(
     spec: QuestionSpec,
     structured_json: str,
 ) -> list[HarnessFlag]:
-    """Rule 12: shape vs QA answer_type."""
+    """Rule 12: shape vs QA answer_type.
+
+    Skips multi-row check when tie_possible=True — for min/max questions,
+    returning multiple tied rows is CORRECT and should not be blocked.
+    """
     if spec.answer_type != "scalar" or not structured_json:
         return []
     try:
@@ -579,15 +583,29 @@ def _check_qa_answer_type(
     num_cols = len(answer)
     max_rows = max((len(v) for v in answer.values() if isinstance(v, list)), default=0)
 
-    if num_cols > 1 or max_rows > 1:
+    # Multi-column: always wrong for a scalar question
+    if num_cols > 1:
         return [HarnessFlag(
             rule="qa_answer_type",
             severity="block",
             message=(
-                f"Expected scalar answer but got {num_cols} columns, "
-                f"{max_rows} rows. Reduce to a single aggregated value."
+                f"Expected scalar answer but got {num_cols} columns "
+                f"({list(answer.keys())}). Reduce to 1 column."
             ),
         )]
+
+    # Multi-row: only block when ties are not possible
+    # For min/max/lowest/highest questions, multiple rows = tied values = correct
+    if max_rows > 1 and not spec.tie_possible:
+        return [HarnessFlag(
+            rule="qa_answer_type",
+            severity="block",
+            message=(
+                f"Expected scalar answer but got {max_rows} rows. "
+                f"Reduce to a single aggregated value."
+            ),
+        )]
+
     return []
 
 
@@ -674,6 +692,66 @@ def _check_scalar_range(
 
 
 # ---------------------------------------------------------------------------
+# Rule 14: Tie-possible check (min/max questions with single-row result)
+# ---------------------------------------------------------------------------
+
+_TIE_QUESTION_PATTERNS = [
+    r"\blowest\b", r"\bhighest\b", r"\bminimum\b", r"\bmaximum\b",
+    r"\bmost\b", r"\bleast\b", r"\bfewest\b", r"\blargest\b", r"\bsmallest\b",
+    r"\bmin\b", r"\bmax\b",
+]
+
+_LIMIT1_PATTERNS = re.compile(
+    r"LIMIT\s+1\b|\.head\(1\)|\.iloc\[0\]|idxmin\(\)|idxmax\(\)|\.nsmallest\(1\)|\.nlargest\(1\)",
+    re.IGNORECASE,
+)
+
+
+def _check_tie_possible(
+    spec: QuestionSpec,
+    question: str,
+    code: str,
+    structured_json: str,
+) -> list[HarnessFlag]:
+    """Rule 14: warn when a tie-possible question returns exactly 1 row.
+
+    Fires when:
+    - QuestionSpec marks tie_possible=True (from QuestionAnalyzer), OR
+    - Question text contains min/max/lowest/highest keywords
+    AND answer has exactly 1 row.
+
+    Guides PlannerCoder to use RANK() or WHERE col = (SELECT MIN/MAX ...)
+    instead of LIMIT 1 so tied values are not silently dropped.
+    """
+    tie_flagged = spec.tie_possible
+    if not tie_flagged:
+        q_lower = question.lower()
+        tie_flagged = any(re.search(p, q_lower) for p in _TIE_QUESTION_PATTERNS)
+
+    if not tie_flagged:
+        return []
+
+    data_rows = _count_answer_rows(structured_json)
+    if data_rows is None or data_rows != 1:
+        return []
+
+    # Only warn when code used LIMIT 1 or similar — avoids false positives
+    # when the data genuinely has a single extreme value
+    if not _LIMIT1_PATTERNS.search(code):
+        return []
+
+    return [HarnessFlag(
+        rule="tie_possible",
+        severity="warn",
+        message=(
+            "Min/max question returned 1 row via LIMIT 1 / head(1) — ties may exist. "
+            "Replace LIMIT 1 with WHERE col = (SELECT MIN/MAX(col) FROM ...) "
+            "or use RANK() OVER (...) to capture all tied values."
+        ),
+    )]
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -715,5 +793,8 @@ def check(
     flags.extend(_check_qa_row_count(spec, stdout, structured_json))
     flags.extend(_check_qa_answer_type(spec, structured_json))
     flags.extend(_check_scalar_range(spec, question, structured_json, data_profile))
+
+    # Rule 14: tie-possible check
+    flags.extend(_check_tie_possible(spec, question, code, structured_json))
 
     return flags

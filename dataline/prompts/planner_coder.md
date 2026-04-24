@@ -126,6 +126,26 @@ If the task contains **both** `.db`/`.sqlite` files **and** `.csv`/`.json` files
 - List a **Mixed candidate set**: SQL first for the .db tables, Python as fallback
 - Reason: SQL handles relational joins more reliably; Python handles flat-file parsing and cross-source merging
 
+## Critical Computation Rules (violations cause silent wrong answers)
+
+### "How many times" → RATIO not DIFFERENCE
+- "X was N times more/larger/higher than Y" → compute `X / Y` (division)
+- "How many times was budget of A more than B?" → `SUM(A) / SUM(B)`, NOT `SUM(A) - SUM(B)`
+- Key signal: question uses "times", "X times as much/large/high"
+
+### Min/Max → handle ties (never use LIMIT 1 alone)
+- "Which event has the lowest/highest cost?" may have MULTIPLE tied rows
+- WRONG: `ORDER BY cost ASC LIMIT 1` — silently drops ties
+- RIGHT: `WHERE cost = (SELECT MIN(cost) FROM events)` — returns ALL tied rows
+- RIGHT: `RANK() OVER (ORDER BY cost ASC)` where rank = 1
+- This applies to: lowest, highest, most, least, fewest, largest, smallest, minimum, maximum
+
+### Keep name columns separate
+- If source data has `first_name` and `last_name` as separate columns, OUTPUT them separately
+- Do NOT concatenate into `full_name` — the scorer matches column values independently
+- WRONG: `save_result(answer={"full_name": [first + " " + last]})`
+- RIGHT: `save_result(answer={"first_name": [...], "last_name": [...]})`
+
 ## Defensive Patterns
 
 1. **Always verify columns exist** before using them

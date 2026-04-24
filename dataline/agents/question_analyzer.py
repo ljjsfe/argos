@@ -78,12 +78,18 @@ def _parse_response(response: str) -> QuestionSpec:
             expected_column_count=max(0, int(data.get("expected_column_count", 0))),
             expected_row_count=_validated_choice(
                 data.get("expected_row_count", "unknown"),
-                ("single", "multiple", "unknown"),
+                ("single", "multiple", "one_or_more", "unknown"),
                 "unknown",
             ),
             value_style=_validated_choice(
                 data.get("value_style", "unknown"),
                 ("numeric", "exact_term", "name", "mixed", "unknown"),
+                "unknown",
+            ),
+            tie_possible=bool(data.get("tie_possible", False)),
+            computation_type=_validated_choice(
+                data.get("computation_type", "unknown"),
+                ("ratio", "difference", "count", "aggregate", "lookup", "unknown"),
                 "unknown",
             ),
             notes=str(data.get("notes", "")),

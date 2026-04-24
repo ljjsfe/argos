@@ -20,8 +20,10 @@ Return STRICT JSON only, no other text:
 {
   "answer_type": "scalar | list | table | unknown",
   "expected_column_count": 0,
-  "expected_row_count": "single | multiple | unknown",
+  "expected_row_count": "single | multiple | one_or_more | unknown",
   "value_style": "numeric | exact_term | name | mixed | unknown",
+  "tie_possible": false,
+  "computation_type": "ratio | difference | count | aggregate | lookup | unknown",
   "notes": "Brief semantic interpretation of what the question asks"
 }
 ```
@@ -42,7 +44,8 @@ Return STRICT JSON only, no other text:
 - Count ONLY output columns, NOT filter/groupby columns unless they appear in the result
 
 ### expected_row_count
-- `single`: Question asks for ONE thing (highest, lowest, total, average, a specific entity)
+- `single`: Question asks for ONE thing (a specific total, average, or unique entity with NO possibility of ties)
+- `one_or_more`: Question asks for min/max/lowest/highest/most/least — result is likely 1 row but TIES ARE POSSIBLE
 - `multiple`: Question asks for a list or table of multiple items
 - `unknown`: Cannot determine
 
@@ -53,19 +56,34 @@ Return STRICT JSON only, no other text:
 - `mixed`: Multiple columns with different value types
 - `unknown`: Cannot determine
 
+### tie_possible
+- `true`: Question uses min/max/lowest/highest/most/least/fewest/largest/smallest — multiple rows may share the extreme value
+- `false`: Result is uniquely determined (aggregation, specific ID lookup, count)
+
+### computation_type
+- `ratio`: Question uses "how many times", "X times more/larger/higher than Y" → answer is X/Y
+- `difference`: Question uses "how much more/less", "difference between" → answer is X-Y
+- `count`: Question uses "how many", "count of" → answer is an integer count
+- `aggregate`: sum, average, min, max of a column
+- `lookup`: retrieve a specific value for a given entity
+- `unknown`: cannot determine
+
 ## Examples
 
 Question: "How many patients have been diagnosed with SLE?"
-→ answer_type=scalar, expected_column_count=1, expected_row_count=single, value_style=numeric
+→ answer_type=scalar, expected_column_count=1, expected_row_count=single, value_style=numeric, tie_possible=false, computation_type=count
+
+Question: "Which event has the lowest cost?"
+→ answer_type=scalar, expected_column_count=1, expected_row_count=one_or_more, value_style=name, tie_possible=true, computation_type=lookup
+
+Question: "How many times was the budget of event A more than event B?"
+→ answer_type=scalar, expected_column_count=1, expected_row_count=single, value_style=numeric, tie_possible=false, computation_type=ratio
 
 Question: "List all countries where revenue exceeded $1M"
-→ answer_type=list, expected_column_count=1, expected_row_count=multiple, value_style=name
+→ answer_type=list, expected_column_count=1, expected_row_count=multiple, value_style=name, tie_possible=false, computation_type=lookup
 
 Question: "What are the top 5 products by sales, with their categories and revenue?"
-→ answer_type=table, expected_column_count=3, expected_row_count=multiple, value_style=mixed
-
-Question: "What is the status of order #12345?"
-→ answer_type=scalar, expected_column_count=1, expected_row_count=single, value_style=exact_term
+→ answer_type=table, expected_column_count=3, expected_row_count=multiple, value_style=mixed, tie_possible=false, computation_type=aggregate
 
 ## Rules
 1. Be conservative — use "unknown" when genuinely uncertain
@@ -74,3 +92,5 @@ Question: "What is the status of order #12345?"
 4. "List" / "Which" / "What are the" → often list or table
 5. "Top N" with attributes → table with N rows
 6. Do NOT guess column names — that is PlannerCoder's job
+7. For min/max/lowest/highest questions: ALWAYS set tie_possible=true and expected_row_count=one_or_more
+8. For "how many times X than Y": ALWAYS set computation_type=ratio

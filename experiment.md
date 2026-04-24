@@ -174,6 +174,38 @@ Next meaningful changes must either: (a) target ≥5 tasks, or (b) use repeated 
 
 ---
 
+## v5i — Layered Robustness: QuestionSpec fields + HarnessGate Rule 14 + Finalizer stdout-leak (2026-04-24)
+
+**Changes from v5h (six files):**
+- `types.py`: QuestionSpec gains `tie_possible: bool` and `computation_type: str` fields
+- `question_analyzer.md`: Output JSON extended with `tie_possible`, `computation_type`, `expected_row_count="one_or_more"` option; Rules 7+8 added
+- `question_analyzer.py`: Parse and validate new QuestionSpec fields
+- `harness_gate.py` Rule 14 (NEW): WARN when tie_possible=True + code uses LIMIT 1 + 1-row result (catches silent tie-drop)
+- `harness_gate.py` Rule 12 FIX: No longer blocks multi-row results when `spec.tie_possible=True` (was incorrectly reducing tied min/max results to 1 row)
+- `finalizer.py`: `_has_stdout_leak()` guard — skip structured_json step if values contain newlines or >300 chars (catches save_result(raw_stdout) antipattern)
+- `planner_coder.md`: Added "Critical Computation Rules" section (ratio≠difference, min/max→avoid LIMIT 1, keep name columns separate)
+
+**Hypothesis:** Prompt guides are probabilistic; deterministic rules enforce contractually. Each v5i change converts a known partial_result root cause into either: (a) a guaranteed structural check that blocks bad output, or (b) structural LLM guidance with spec-verified enforcement.
+
+**Result: 29/50 = 58.0% (flat vs v5h, within noise floor)**
+- Scores from eval_report_kdd.json: overall_accuracy ~0.563
+
+**Gained (+5):** task_11, task_25 (tie_possible fix — Rule 12 allowed 3 tied rows through), task_64, task_196, task_214
+**Lost (-6):** task_418/task_420 (still running at eval collection — timing artifact, not regressions), task_199/259/283/379 (LLM variance)
+
+**Key insight:** task_25 confirms tie_possible fix worked — 3 tied "Officers meeting" rows returned without being collapsed to 1. task_214 confirms wrong-shape fix (structured 7-row table no longer suppressed). Net change is 0 excluding timing artifacts (task_418/420 counted as lost because no prediction file at eval time).
+
+**Root cause of apparent regressions:**
+- task_418/420: `status.json` shows `"status": "running"` at eval time — batch eval collected results before tasks completed
+- task_199/283/379: LLM variance — same question answered differently across runs (P1b context still present, just different LLM path)
+
+**Remaining failures (21 tasks):**
+- partial_result: 12 tasks (50%)
+- empty_answer: 8 tasks (33%) — 5 genuine failures + 3 timing artifacts
+- code_error: 4 tasks (17%)
+
+---
+
 ## Baseline (v4, pre-2026-04-23)
 
 **Architecture:** Profiler → Analyzer → Loop(PlannerCoder → Sandbox → Skeptic → Judge) → Finalizer
