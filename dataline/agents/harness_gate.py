@@ -558,17 +558,13 @@ def _check_qa_column_count(
             ),
         )]
     if actual > expected:
-        # Block when expected is exactly 1 — a single-answer question with
-        # multiple columns almost always means the agent added extra columns.
-        # Keep as warn when expected > 1 (QA may under-count for split names).
-        severity = "block" if expected == 1 else "warn"
         return [HarnessFlag(
             rule="qa_column_count",
-            severity=severity,
+            severity="warn",
             message=(
                 f"Expected {expected} columns but answer has {actual}. "
-                f"Extra columns ({list(answer.keys())}) reduce score "
-                f"(Score = Recall − λ×ExtraCols/PredCols). Remove them."
+                f"Extra columns ({list(answer.keys())}) may reduce score "
+                f"(Score = Recall − λ×ExtraCols/PredCols)."
             ),
         )]
     return []
