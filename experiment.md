@@ -135,10 +135,15 @@ HarnessGate blocks prevent Judge from seeing garbage results, saving LLM budget.
 **Critical finding: LLM variance ±4-5 tasks at temperature=0 across runs**
 Changes of ±2 tasks are within noise floor. Only improvements >5 tasks are statistically meaningful on this 50-task eval set.
 
-**P3a revised direction (not yet implemented):**
-- Pass `question` + `plan_intent` to Debugger — correct, keeps it focused on the goal
-- Do NOT pass `judge_guidance` — this is high-level PlannerCoder guidance, confuses Debugger into rewriting logic instead of fixing crash
-- Separate concern: Debugger should only fix execution errors, not redesign the algorithm
+**P3a revised direction (v5g, also rolled back):**
+- v5g tested: pass `question` + `plan_intent` only (no `judge_guidance`) → 23/50 = 46%, same as v5f
+- 7 losses in v5g: only 2 had Debugger involvement, 5 had zero crashes — pure LLM variance
+- Conclusion: P3a gains are real but insufficient to overcome ±5 task run-to-run variance on 50-task eval
+- The 50-task eval set has too low signal-to-noise ratio for changes affecting <5 tasks
+
+**Definitive finding: eval noise floor is ±4-5 tasks**
+Any improvement targeting fewer than 5 tasks cannot be reliably measured on this benchmark.
+Next meaningful changes must either: (a) target ≥5 tasks, or (b) use repeated runs to average out variance.
 
 ---
 
