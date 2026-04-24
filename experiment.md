@@ -117,6 +117,31 @@ HarnessGate blocks prevent Judge from seeing garbage results, saving LLM budget.
 
 ---
 
+## v5f — P3a (Debugger context) + P3b (empty_output diagnostic) — ROLLED BACK (2026-04-23)
+
+**Changes attempted:**
+- P3a: Debugger prompt + signature — add `question`, `plan_intent`, `judge_guidance` to context
+- P3b: Orchestrator — `consecutive_empty_output` counter, inject diagnostic guidance after ≥2 consecutive empty_output blocks
+
+**Result: 23/50 = 46.0% (-10pp vs v5e) — rolled back**
+- Gains (+2): task_11 (P3b diagnostic worked), task_259
+- Losses (-7): task_19, task_257, task_269, task_330, task_350, task_418, task_64
+
+**Root cause analysis:**
+- 4/7 losses (task_19/330/257/64) had NO Debugger involvement — pure LLM variance between runs
+- 2/7 losses (task_269/350) had empty prediction.csv despite judge=finish — Finalizer extraction failed, likely code did not call save_result() properly after Debugger rewrote logic
+- 1/7 (task_418) had empty_answer, possibly P3b diagnostic loop disrupted flow
+
+**Critical finding: LLM variance ±4-5 tasks at temperature=0 across runs**
+Changes of ±2 tasks are within noise floor. Only improvements >5 tasks are statistically meaningful on this 50-task eval set.
+
+**P3a revised direction (not yet implemented):**
+- Pass `question` + `plan_intent` to Debugger — correct, keeps it focused on the goal
+- Do NOT pass `judge_guidance` — this is high-level PlannerCoder guidance, confuses Debugger into rewriting logic instead of fixing crash
+- Separate concern: Debugger should only fix execution errors, not redesign the algorithm
+
+---
+
 ## Baseline (v4, pre-2026-04-23)
 
 **Architecture:** Profiler → Analyzer → Loop(PlannerCoder → Sandbox → Skeptic → Judge) → Finalizer
