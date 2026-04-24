@@ -435,6 +435,51 @@ def _check_empty_answer(
 
 
 # ---------------------------------------------------------------------------
+# Rule 8b: Dict-string answer detection
+# ---------------------------------------------------------------------------
+
+_DICT_STRING_RE = re.compile(r"^\{.*\}$", re.DOTALL)
+
+
+def _check_dict_string_answer(structured_json: str) -> list[HarnessFlag]:
+    """Rule 8b: detect save_result() called with a dict-as-string value.
+
+    Pattern: agent computed a dict of intermediate values and called
+    save_result(answer={"col": str(some_dict)}).  The scorer receives a
+    string like "{'pct': 31.2, 'n': 750}" instead of the scalar 31.2.
+
+    Detection: any answer value is a string that matches '{...}'.
+    """
+    if not structured_json:
+        return []
+    try:
+        data = json.loads(structured_json)
+        answer = data.get("answer", {})
+        if not isinstance(answer, dict):
+            return []
+    except (json.JSONDecodeError, ValueError):
+        return []
+
+    for col, vals in answer.items():
+        if not isinstance(vals, list):
+            continue
+        for v in vals:
+            if isinstance(v, str) and _DICT_STRING_RE.match(v.strip()):
+                return [HarnessFlag(
+                    rule="dict_string_answer",
+                    severity="block",
+                    message=(
+                        f"Column '{col}' value looks like a Python dict string: "
+                        f"'{v[:80]}'. "
+                        f"save_result() was called with str(dict) instead of the "
+                        f"actual scalar value. Extract the correct scalar and pass "
+                        f"it directly: save_result(answer={{'{col}': [value]}})."
+                    ),
+                )]
+    return []
+
+
+# ---------------------------------------------------------------------------
 # Rule 9: Value embellishment (formatting artifacts)
 # ---------------------------------------------------------------------------
 
@@ -513,12 +558,17 @@ def _check_qa_column_count(
             ),
         )]
     if actual > expected:
+        # Block when expected is exactly 1 — a single-answer question with
+        # multiple columns almost always means the agent added extra columns.
+        # Keep as warn when expected > 1 (QA may under-count for split names).
+        severity = "block" if expected == 1 else "warn"
         return [HarnessFlag(
             rule="qa_column_count",
-            severity="warn",
+            severity=severity,
             message=(
                 f"Expected {expected} columns but answer has {actual}. "
-                f"Extra columns ({list(answer.keys())}) may reduce score."
+                f"Extra columns ({list(answer.keys())}) reduce score "
+                f"(Score = Recall − λ×ExtraCols/PredCols). Remove them."
             ),
         )]
     return []
@@ -786,6 +836,7 @@ def check(
     flags.extend(_check_column_merge(code, structured_json))
     flags.extend(_check_extra_columns(question, structured_json))
     flags.extend(_check_empty_answer(question, structured_json))
+    flags.extend(_check_dict_string_answer(structured_json))
     flags.extend(_check_value_embellishment(structured_json))
 
     # Rules 10-13: QA rules (only if spec has non-unknown values)
