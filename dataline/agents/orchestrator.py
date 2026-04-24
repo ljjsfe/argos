@@ -35,7 +35,6 @@ from ..core.tracing_llm import TracingLLMClient
 from ..core.types import (
     AnalysisState,
     JudgeDecision,
-    HarnessFlag,
     Manifest,
     PlanStep,
     SandboxResult,
@@ -223,11 +222,10 @@ def run_task(
             iter_obs["num_candidates"] = len(pc_output.candidates)
             iter_obs["reasoning"] = pc_output.reasoning
 
-            # ── Execute ALL candidates and compare ──
+            # ── Execute candidates in order ──
             result: SandboxResult | None = None
             winning_code = ""
             step_id = f"step_{iteration}"
-            all_successes: list[tuple[int, str, str, SandboxResult]] = []
 
             for ci, candidate_code in enumerate(pc_output.candidates):
                 # Detect if candidate is raw SQL (no Python imports/statements)
@@ -249,32 +247,19 @@ def run_task(
                     )
 
                 if candidate_result.return_code == 0:
-                    all_successes.append((ci, candidate_code, candidate_lang, candidate_result))
+                    result = candidate_result
+                    winning_code = candidate_code
                     _log(trace, "sandbox",
                          f"Candidate {ci} ({candidate_lang}) succeeded | "
                          f"output: {len(candidate_result.stdout)} chars | "
                          f"time: {candidate_result.execution_time_ms}ms")
+                    iter_obs["winning_candidate"] = ci
+                    iter_obs["winning_language"] = candidate_lang
+                    break
                 else:
                     _log(trace, "sandbox",
                          f"Candidate {ci} ({candidate_lang}) failed: "
                          f"{candidate_result.stderr[:200]}")
-
-            # Pick winner (first successful) and check consensus
-            consensus_flag: HarnessFlag | None = None
-            if all_successes:
-                ci_win, winning_code, winning_lang, result = all_successes[0]
-                iter_obs["winning_candidate"] = ci_win
-                iter_obs["winning_language"] = winning_lang
-                iter_obs["candidates_succeeded"] = len(all_successes)
-
-                consensus_flag = _check_candidate_consensus(all_successes)
-                if consensus_flag:
-                    _log(trace, "consensus", consensus_flag.message[:200])
-                    iter_obs["candidate_consensus"] = False
-                elif len(all_successes) > 1:
-                    _log(trace, "consensus",
-                         f"{len(all_successes)} candidates agree")
-                    iter_obs["candidate_consensus"] = True
 
             # If all candidates failed, try debugger on the first one
             if result is None or result.return_code != 0:
@@ -345,10 +330,6 @@ def run_task(
 
             blocking = [f for f in harness_flags if f.severity == "block"]
             warnings = [f for f in harness_flags if f.severity == "warn"]
-
-            # Inject candidate disagreement signal into warnings for Judge
-            if consensus_flag is not None:
-                warnings = [*warnings, consensus_flag]
 
             if harness_flags:
                 flag_summary = "; ".join(
@@ -528,92 +509,6 @@ def run_task(
         )
     finally:
         sandbox.cleanup()
-
-
-# ---------------------------------------------------------------------------
-# Candidate consensus: compare structured answers from multiple successes
-# ---------------------------------------------------------------------------
-
-def _check_candidate_consensus(
-    successes: list[tuple[int, str, str, SandboxResult]],
-) -> HarnessFlag | None:
-    """Compare structured answers from multiple successful candidates.
-
-    Returns None if all agree or fewer than 2 candidates succeeded.
-    Returns a HarnessFlag (warn) describing the disagreement if they differ.
-
-    The disagreement signal is valuable: it tells the Judge that the problem
-    has ambiguity or that one computation path is wrong — much more
-    informative than any single candidate's result alone.
-    """
-    if len(successes) < 2:
-        return None
-
-    answers: list[tuple[int, str, dict]] = []
-    for ci, _code, lang, res in successes:
-        if not res.structured_json:
-            continue
-        try:
-            data = json.loads(res.structured_json)
-            answer = data.get("answer", {})
-            if isinstance(answer, dict) and answer:
-                answers.append((ci, lang, answer))
-        except (json.JSONDecodeError, ValueError):
-            pass
-
-    if len(answers) < 2:
-        return None
-
-    # Compare all answers against the first
-    first = answers[0][2]
-    if all(_answers_match(first, a[2]) for a in answers[1:]):
-        return None  # Consensus — no signal needed
-
-    # Build disagreement summary
-    parts = []
-    for ci, lang, answer in answers:
-        compact = {
-            k: (v[:3] + ["..."] if isinstance(v, list) and len(v) > 3 else v)
-            for k, v in answer.items()
-        }
-        parts.append(f"  Candidate {ci} ({lang}): {json.dumps(compact, default=str)[:200]}")
-
-    return HarnessFlag(
-        rule="candidate_disagreement",
-        severity="warn",
-        message=(
-            "Multiple code candidates succeeded but produced DIFFERENT answers:\n"
-            + "\n".join(parts)
-            + "\nThis indicates ambiguity or a computation error in one candidate. "
-            "Verify which result is correct before accepting."
-        ),
-    )
-
-
-def _answers_match(a: dict, b: dict) -> bool:
-    """Check if two structured answer dicts produce equivalent results."""
-    if set(a.keys()) != set(b.keys()):
-        return False
-    for k in a:
-        va, vb = a.get(k, []), b.get(k, [])
-        if not isinstance(va, list) or not isinstance(vb, list):
-            if str(va) != str(vb):
-                return False
-            continue
-        if len(va) != len(vb):
-            return False
-        for x, y in zip(va, vb):
-            sx, sy = str(x).strip(), str(y).strip()
-            if sx == sy:
-                continue
-            # Tolerant numeric comparison
-            try:
-                if abs(float(x) - float(y)) < 1e-6:
-                    continue
-            except (ValueError, TypeError):
-                pass
-            return False
-    return True
 
 
 def _detect_language(code: str, planner_hint: str) -> str:
