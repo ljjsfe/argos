@@ -1,10 +1,13 @@
 """HarnessGate: deterministic verification layer between Sandbox and Judge.
 
-Zero LLM cost. 13 rules derived from v4 eval failure-mode analysis.
+Zero LLM cost. Rules derived from eval failure-mode analysis.
 
 Severity levels:
 - "block": skip Judge, use message as guidance for next iteration
 - "warn":  pass to Judge as reference information
+
+Block fatigue (in orchestrator): same rule blocking ≥3 consecutive times
+→ downgraded to warn so Judge can accept partial results.
 
 If no flags → normal Judge flow.
 """
@@ -69,7 +72,10 @@ def _check_agg_type(question: str, code: str) -> list[HarnessFlag]:
 
 
 # ---------------------------------------------------------------------------
-# Rule 2: Scalar question producing too many rows
+# Rule 2: Shape verification (unified)
+#
+# Merges former rules 2, 7b-scalar, 11, 12 into one coherent check.
+# Avoids duplicate/conflicting flags for the same shape issue.
 # ---------------------------------------------------------------------------
 
 _SCALAR_PATTERNS = [
@@ -78,22 +84,11 @@ _SCALAR_PATTERNS = [
 ]
 
 
-def _count_data_lines(stdout: str) -> int:
-    """Count non-header, non-empty lines in stdout."""
-    lines = [ln for ln in stdout.strip().splitlines() if ln.strip()]
-    # Skip common header patterns
-    if lines and re.match(r"^\s*[\w_]+\s{2,}", lines[0]):
-        lines = lines[1:]  # skip DataFrame header
-    return len(lines)
-
-
 def _count_answer_rows(structured_json: str) -> int | None:
     """Count answer rows from structured_json only.
 
     Returns None if structured_json is absent or unparseable — callers must
     handle None by skipping the rule rather than falling back to stdout.
-    stdout line counting is fundamentally unreliable: agents print many
-    diagnostic lines that are not part of the answer.
     """
     if not structured_json:
         return None
@@ -109,70 +104,112 @@ def _count_answer_rows(structured_json: str) -> int | None:
     return None
 
 
-def _check_output_shape(question: str, stdout: str, structured_json: str) -> list[HarnessFlag]:
-    q_lower = question.lower()
-    if not any(re.search(p, q_lower) for p in _SCALAR_PATTERNS):
-        return []
-    data_rows = _count_answer_rows(structured_json)
-    # Only fire when we have a reliable row count from structured output.
-    # If structured_json is absent (agent still exploring), skip — stdout
-    # line counts are too noisy to be useful here.
-    if data_rows is None:
-        return []
-    if data_rows > 5:
-        return [HarnessFlag(
-            rule="output_shape",
-            severity="block",
-            message=(
-                f"Scalar question but answer has {data_rows} rows. "
-                f"Expected a single aggregated value. Add aggregation "
-                f"(COUNT/SUM/AVG/MIN/MAX) to reduce to one row."
-            ),
-        )]
-    return []
+def _count_answer_cols(structured_json: str) -> int | None:
+    """Count answer columns from structured_json."""
+    if not structured_json:
+        return None
+    try:
+        data = json.loads(structured_json)
+        answer = data.get("answer", {})
+        if isinstance(answer, dict):
+            return len(answer)
+    except (json.JSONDecodeError, ValueError):
+        pass
+    return None
 
 
-# ---------------------------------------------------------------------------
-# Rule 3: Phantom filter conditions
-# ---------------------------------------------------------------------------
+def _check_shape(
+    question: str,
+    structured_json: str,
+    spec: "QuestionSpec",
+) -> list[HarnessFlag]:
+    """Unified shape check: rows and columns vs question type + QA spec.
 
-_JSON_STRUCTURAL_WORDS = frozenset({
-    "records", "data", "columns", "index", "values", "orient",
-    "split", "table", "true", "false", "null", "none",
-})
-
-_DATE_PATTERN = re.compile(r"^\d{4}[-/]\d{2}[-/]\d{2}")
-
-
-def _check_phantom_filter(question: str, code: str) -> list[HarnessFlag]:
-    # Extract string literals from WHERE clauses
-    where_matches = re.findall(
-        r"WHERE\s+.*?'([^']+)'",
-        code,
-        re.IGNORECASE | re.DOTALL,
-    )
-    if not where_matches:
-        return []
-
-    q_lower = question.lower()
+    Produces at most one BLOCK per dimension (rows, columns) to avoid
+    redundant flags from the old separate rules.
+    """
     flags: list[HarnessFlag] = []
-    for literal in where_matches:
-        lit_lower = literal.lower().strip()
-        if lit_lower in _JSON_STRUCTURAL_WORDS:
-            continue
-        if _DATE_PATTERN.match(literal):
-            continue
-        if lit_lower not in q_lower:
+    q_lower = question.lower()
+    is_scalar_q = any(re.search(p, q_lower) for p in _SCALAR_PATTERNS)
+
+    rows = _count_answer_rows(structured_json)
+    cols = _count_answer_cols(structured_json)
+
+    # --- Row checks ---
+    if rows is not None:
+        # Scalar question with too many rows
+        if is_scalar_q and rows > 5:
             flags.append(HarnessFlag(
-                rule="phantom_filter",
-                severity="warn",
+                rule="output_shape",
+                severity="block",
                 message=(
-                    f"WHERE clause uses string '{literal}' which does not "
-                    f"appear in the question. This may be a hallucinated "
-                    f"filter value (or it may come from domain rules)."
+                    f"Scalar question but answer has {rows} rows. "
+                    f"Expected a single aggregated value. Add aggregation "
+                    f"(COUNT/SUM/AVG/MIN/MAX) to reduce to one row."
                 ),
             ))
+        # QA spec: single expected but got many
+        elif (spec.expected_row_count == "single" and rows > 5
+              and not is_scalar_q):
+            flags.append(HarnessFlag(
+                rule="output_shape",
+                severity="block",
+                message=(
+                    f"Expected single-row answer but answer has {rows} rows. "
+                    f"Add aggregation to reduce to one result."
+                ),
+            ))
+        # QA spec: multiple expected but got 1
+        elif spec.expected_row_count == "multiple" and rows == 1:
+            flags.append(HarnessFlag(
+                rule="output_shape",
+                severity="warn",
+                message=(
+                    "Expected multiple rows but answer has only 1 row. "
+                    "Verify the query isn't over-aggregating."
+                ),
+            ))
+        # Scalar answer type with multiple rows (non-tie)
+        elif (spec.answer_type == "scalar" and rows > 1
+              and not spec.tie_possible and not is_scalar_q):
+            flags.append(HarnessFlag(
+                rule="output_shape",
+                severity="block",
+                message=(
+                    f"Expected scalar answer but got {rows} rows. "
+                    f"Reduce to a single aggregated value."
+                ),
+            ))
+
+    # --- Column checks ---
+    if cols is not None:
+        # Scalar question with multiple columns
+        if is_scalar_q and cols > 1:
+            flags.append(HarnessFlag(
+                rule="output_shape",
+                severity="block",
+                message=(
+                    f"Scalar question but answer has {cols} columns. "
+                    f"Expected 1 column. Remove extra columns."
+                ),
+            ))
+        elif spec.answer_type == "scalar" and cols > 1 and not is_scalar_q:
+            flags.append(HarnessFlag(
+                rule="output_shape",
+                severity="block",
+                message=(
+                    f"Expected scalar answer but got {cols} columns. "
+                    f"Reduce to 1 column."
+                ),
+            ))
+
     return flags
+
+
+# ---------------------------------------------------------------------------
+# Rule 3: (removed — phantom_filter had high false-positive rate due to
+# domain rules introducing filter values not present in the question)
+# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
@@ -325,9 +362,12 @@ _DEBUG_COLUMN_PATTERNS = [
 
 
 def _check_extra_columns(
-    question: str,
     structured_json: str,
 ) -> list[HarnessFlag]:
+    """Rule 7b: detect debug/index columns in answer.
+
+    Scalar-with-multi-column check moved to unified _check_shape().
+    """
     if not structured_json:
         return []
     try:
@@ -339,8 +379,6 @@ def _check_extra_columns(
         return []
 
     flags: list[HarnessFlag] = []
-
-    # (a) Debug columns
     for col_name in answer:
         col_lower = col_name.lower().strip()
         if any(re.match(p, col_lower) for p in _DEBUG_COLUMN_PATTERNS):
@@ -353,21 +391,6 @@ def _check_extra_columns(
                     f"(Score = Recall − λ×ExtraCols/PredCols)."
                 ),
             ))
-
-    # (b) Scalar question with multiple columns
-    q_lower = question.lower()
-    if any(re.search(p, q_lower) for p in _SCALAR_PATTERNS):
-        if len(answer) > 1:
-            flags.append(HarnessFlag(
-                rule="extra_columns",
-                severity="block",
-                message=(
-                    f"Scalar question but answer has {len(answer)} columns "
-                    f"({list(answer.keys())}). Expected 1 column. "
-                    f"Remove extra columns to avoid score penalty."
-                ),
-            ))
-
     return flags
 
 
@@ -582,7 +605,11 @@ def _check_qa_column_count(
     spec: QuestionSpec,
     structured_json: str,
 ) -> list[HarnessFlag]:
-    """Rule 10: column count vs QA expectation."""
+    """Rule 10: column count vs QA expectation.
+
+    Missing columns → always BLOCK (reduces recall).
+    Extra columns → BLOCK when ratio ≥ 3x (clearly wrong), else WARN.
+    """
     if spec.expected_column_count <= 0 or not structured_json:
         return []
     try:
@@ -605,101 +632,21 @@ def _check_qa_column_count(
             ),
         )]
     if actual > expected:
+        severity = "block" if actual >= expected * 3 else "warn"
         return [HarnessFlag(
             rule="qa_column_count",
-            severity="warn",
+            severity=severity,
             message=(
                 f"Expected {expected} columns but answer has {actual}. "
-                f"Extra columns ({list(answer.keys())}) may reduce score "
-                f"(Score = Recall − λ×ExtraCols/PredCols)."
+                f"Extra columns ({list(answer.keys())}) reduce score "
+                f"(Score = Recall − λ×ExtraCols/PredCols). "
+                f"Return ONLY the columns the question asks for."
             ),
         )]
     return []
 
 
-def _check_qa_row_count(
-    spec: QuestionSpec,
-    stdout: str,
-    structured_json: str,
-) -> list[HarnessFlag]:
-    """Rule 11: row count vs QA expectation.
-
-    Only fires when structured_json is present and parseable. Without it we
-    cannot reliably distinguish answer rows from diagnostic print lines.
-    """
-    if spec.expected_row_count == "unknown":
-        return []
-    data_rows = _count_answer_rows(structured_json)
-    if data_rows is None:
-        # No structured output yet — agent still exploring. Skip.
-        return []
-    if spec.expected_row_count == "single" and data_rows > 5:
-        return [HarnessFlag(
-            rule="qa_row_count",
-            severity="block",
-            message=(
-                f"Expected single-row answer but answer has {data_rows} rows. "
-                f"Add aggregation to reduce to one result."
-            ),
-        )]
-    if spec.expected_row_count == "multiple" and data_rows == 1:
-        return [HarnessFlag(
-            rule="qa_row_count",
-            severity="warn",
-            message=(
-                "Expected multiple rows but answer has only 1 row. "
-                "Verify the query isn't over-aggregating."
-            ),
-        )]
-    return []
-
-
-def _check_qa_answer_type(
-    spec: QuestionSpec,
-    structured_json: str,
-) -> list[HarnessFlag]:
-    """Rule 12: shape vs QA answer_type.
-
-    Skips multi-row check when tie_possible=True — for min/max questions,
-    returning multiple tied rows is CORRECT and should not be blocked.
-    """
-    if spec.answer_type != "scalar" or not structured_json:
-        return []
-    try:
-        data = json.loads(structured_json)
-        answer = data.get("answer", {})
-        if not isinstance(answer, dict):
-            return []
-    except (json.JSONDecodeError, ValueError):
-        return []
-
-    num_cols = len(answer)
-    max_rows = max((len(v) for v in answer.values() if isinstance(v, list)), default=0)
-
-    # Multi-column: always wrong for a scalar question
-    if num_cols > 1:
-        return [HarnessFlag(
-            rule="qa_answer_type",
-            severity="block",
-            message=(
-                f"Expected scalar answer but got {num_cols} columns "
-                f"({list(answer.keys())}). Reduce to 1 column."
-            ),
-        )]
-
-    # Multi-row: only block when ties are not possible
-    # For min/max/lowest/highest questions, multiple rows = tied values = correct
-    if max_rows > 1 and not spec.tie_possible:
-        return [HarnessFlag(
-            rule="qa_answer_type",
-            severity="block",
-            message=(
-                f"Expected scalar answer but got {max_rows} rows. "
-                f"Reduce to a single aggregated value."
-            ),
-        )]
-
-    return []
+    # Rules 11 and 12 (qa_row_count, qa_answer_type) merged into _check_shape()
 
 
 def _check_scalar_range(
@@ -869,27 +816,24 @@ def check(
     spec = question_spec or QuestionSpec()
     flags: list[HarnessFlag] = []
 
-    # Rules 1-9: always run
+    # Core checks
     flags.extend(_check_agg_type(question, code))
-    flags.extend(_check_output_shape(question, stdout, structured_json))
-    flags.extend(_check_phantom_filter(question, code))
+    flags.extend(_check_shape(question, structured_json, spec))
     flags.extend(_check_join_cardinality(stdout))
     flags.extend(_check_empty_output(question, stdout))
     flags.extend(_check_row_count_bound(stdout, data_profile))
     flags.extend(_check_column_merge(code, structured_json))
-    flags.extend(_check_extra_columns(question, structured_json))
+    flags.extend(_check_extra_columns(structured_json))
     flags.extend(_check_empty_answer(question, structured_json))
     flags.extend(_check_dict_string_answer(structured_json))
     flags.extend(_check_nan_values(structured_json))
     flags.extend(_check_value_embellishment(structured_json))
 
-    # Rules 10-13: QA rules (only if spec has non-unknown values)
+    # QA-spec checks
     flags.extend(_check_qa_column_count(spec, structured_json))
-    flags.extend(_check_qa_row_count(spec, stdout, structured_json))
-    flags.extend(_check_qa_answer_type(spec, structured_json))
     flags.extend(_check_scalar_range(spec, question, structured_json, data_profile))
 
-    # Rule 14: tie-possible check
+    # Tie-possible check
     flags.extend(_check_tie_possible(spec, question, code, structured_json))
 
     return flags

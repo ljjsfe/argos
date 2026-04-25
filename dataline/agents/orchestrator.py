@@ -34,6 +34,7 @@ from ..core.tracer import TaskTracer
 from ..core.tracing_llm import TracingLLMClient
 from ..core.types import (
     AnalysisState,
+    HarnessFlag,
     JudgeDecision,
     Manifest,
     PlanStep,
@@ -191,6 +192,7 @@ def run_task(
         strategy_changes_used = 0
         max_strategy_changes = 1
         judge_guidance = ""
+        consecutive_blocks: dict[str, int] = {}  # rule -> consecutive count
 
         # ─── Stage 4: Unified Loop ───
         for iteration in range(max_iterations):
@@ -327,6 +329,31 @@ def run_task(
                 question_spec=question_spec,
                 structured_json=result.structured_json,
             )
+
+            # ── Block fatigue: downgrade repeated blocks to warns ──
+            current_block_rules = {f.rule for f in harness_flags if f.severity == "block"}
+            for rule in current_block_rules:
+                consecutive_blocks[rule] = consecutive_blocks.get(rule, 0) + 1
+            # Clear counters for rules that didn't block this iteration
+            for rule in list(consecutive_blocks):
+                if rule not in current_block_rules:
+                    consecutive_blocks[rule] = 0
+
+            fatigued_rules = {
+                rule for rule, count in consecutive_blocks.items()
+                if count >= 3
+            }
+            if fatigued_rules:
+                harness_flags = [
+                    HarnessFlag(
+                        rule=f.rule, severity="warn",
+                        message=f"[fatigue] {f.message}",
+                    ) if f.severity == "block" and f.rule in fatigued_rules
+                    else f
+                    for f in harness_flags
+                ]
+                _log(trace, "harness_gate",
+                     f"Block fatigue: {fatigued_rules} downgraded to warn (≥3 consecutive)")
 
             blocking = [f for f in harness_flags if f.severity == "block"]
             warnings = [f for f in harness_flags if f.severity == "warn"]
