@@ -591,9 +591,6 @@ def _check_qa_column_count(
     return []
 
 
-    # Rules 11 and 12 (qa_row_count, qa_answer_type) merged into _check_shape()
-
-
 def _check_scalar_range(
     spec: QuestionSpec,
     question: str,
@@ -614,15 +611,15 @@ def _check_scalar_range(
     except (json.JSONDecodeError, ValueError):
         return []
 
-    # Extract the numeric value
+    # Extract the numeric value (try each column until we find a number)
     value = None
     for vals in answer.values():
         if isinstance(vals, list) and vals:
             try:
                 value = float(vals[0])
+                break
             except (ValueError, TypeError):
                 pass
-        break
 
     if value is None:
         return []

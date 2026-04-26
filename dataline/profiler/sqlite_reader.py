@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import sqlite3
 
 import pandas as pd
@@ -13,9 +12,6 @@ from ..core.types import ManifestEntry
 from .column_stats import compute_column_stats, compressed_value_repr
 
 logger = logging.getLogger(__name__)
-
-# Only allow valid SQLite identifiers (letters, digits, underscores)
-_SAFE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def read_sqlite(file_path: str) -> ManifestEntry:
@@ -113,6 +109,9 @@ def _profile_table(conn: sqlite3.Connection, table_name: str) -> dict:
 
         columns.append(col_info)
 
+    # Full-table DISTINCT value scan for low-cardinality text columns
+    _scan_distinct_values(conn, quoted_table, row_count, columns)
+
     sample_rows = [dict(zip(col_names, row)) for row in sample_rows_raw]
 
     return {
@@ -121,6 +120,58 @@ def _profile_table(conn: sqlite3.Connection, table_name: str) -> dict:
         "columns": columns,
         "sample_rows": sample_rows,
     }
+
+
+_DISTINCT_LIMIT = 30  # Max unique values to enumerate
+
+
+def _scan_distinct_values(
+    conn: sqlite3.Connection,
+    quoted_table: str,
+    row_count: int,
+    columns: list[dict],
+) -> None:
+    """Compute exact cardinality and DISTINCT values for all columns.
+
+    For text columns with ≤ _DISTINCT_LIMIT unique values, stores all distinct
+    values. For all columns, stores exact cardinality and null percentage.
+    Mutates column dicts in place.
+    """
+    if row_count == 0:
+        return
+
+    for col_info in columns:
+        quoted_col = _quote_identifier(col_info["name"])
+        try:
+            # Exact cardinality
+            result = conn.execute(
+                f"SELECT COUNT(DISTINCT {quoted_col}) FROM {quoted_table}"
+            ).fetchone()
+            n_unique = result[0] if result else 0
+            col_info["cardinality"] = n_unique
+
+            # Null percentage from full table
+            null_result = conn.execute(
+                f"SELECT COUNT(*) FROM {quoted_table} WHERE {quoted_col} IS NULL"
+            ).fetchone()
+            null_count = null_result[0] if null_result else 0
+            col_info["null_pct"] = round(null_count / max(row_count, 1), 3)
+
+            # Enumerate distinct values for low-cardinality text columns
+            dtype_lower = col_info.get("dtype", "").upper()
+            is_text = dtype_lower in ("TEXT", "VARCHAR", "CHAR", "") or "TEXT" in dtype_lower
+            if is_text and n_unique <= _DISTINCT_LIMIT:
+                vals_raw = conn.execute(
+                    f"SELECT DISTINCT {quoted_col} FROM {quoted_table} "
+                    f"WHERE {quoted_col} IS NOT NULL ORDER BY {quoted_col}"
+                ).fetchall()
+                vals = [row[0] for row in vals_raw]
+                # Skip if any value is very long (XML blobs, JSON strings)
+                if all(len(str(v)) <= 100 for v in vals):
+                    col_info["distinct_values"] = [str(v) for v in vals]
+        except (sqlite3.OperationalError, sqlite3.DatabaseError) as exc:
+            logger.warning("Failed to scan distinct values for %s: %s", col_info["name"], exc)
+            continue
 
 
 def _get_foreign_keys(conn: sqlite3.Connection, tables: list[str]) -> list[dict]:

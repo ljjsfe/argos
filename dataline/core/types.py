@@ -68,22 +68,6 @@ class StepRecord:
 
 
 @dataclass(frozen=True)
-class VerifierVerdict:
-    """Verifier's judgment on sufficiency."""
-    sufficient: bool
-    reasoning: str = ""
-    missing: str = ""
-
-
-@dataclass(frozen=True)
-class RouterDecision:
-    """Router's decision on next action."""
-    action: str  # continue | backtrack | finish
-    truncate_to: int = 0
-    reasoning: str = ""
-
-
-@dataclass(frozen=True)
 class JudgeDecision:
     """Judge's combined verdict: sufficiency + routing + guidance.
 
@@ -201,6 +185,7 @@ class AnalysisState:
     key_findings: tuple[str, ...] = ()              # 1-line verified findings
     variables_in_scope: tuple[tuple[str, str], ...] = ()  # (pickle_name, description)
     judge_guidance: str = ""                        # steering instruction from judge for next iteration
+    harness_feedback: str = ""                       # deterministic block/warn messages from HarnessGate
     completed_steps: tuple[str, ...] = ()           # 1-line per step
     full_step_details: tuple[StepRecord, ...] = ()  # raw data for Finalizer + Judge
 

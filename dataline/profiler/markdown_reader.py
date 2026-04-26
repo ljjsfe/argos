@@ -35,7 +35,6 @@ def read_markdown(file_path: str) -> ManifestEntry:
             "headings": headings[:30],
             "key_terms": sorted(key_terms)[:30],
             "table_count": max(table_count, 0),
-            "text_preview": text[:10000],
             "char_count": len(text),
         },
     )

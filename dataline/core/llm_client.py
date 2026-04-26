@@ -230,15 +230,27 @@ class LLMClient:
 
 
 def create_client_from_config(config: dict) -> LLMClient:
-    """Create LLMClient from config.yaml llm section."""
+    """Create LLMClient from config.yaml llm section.
+
+    Eval environment variables (MODEL_API_URL, MODEL_API_KEY, MODEL_NAME)
+    override config.yaml values when set.
+    """
     llm_cfg = config["llm"]
-    api_key = os.environ.get(llm_cfg.get("api_key_env", ""), "")
+
+    # Eval environment overrides (injected by KDD Cup Docker runtime)
+    model = os.environ.get("MODEL_NAME", "") or llm_cfg["model"]
+    base_url = os.environ.get("MODEL_API_URL", "") or llm_cfg.get("base_url")
+    api_key = (
+        os.environ.get("MODEL_API_KEY", "")
+        or os.environ.get(llm_cfg.get("api_key_env", ""), "")
+    )
+
     return LLMClient(
         LLMConfig(
             provider=llm_cfg["provider"],
-            model=llm_cfg["model"],
+            model=model,
             api_key=api_key,
-            base_url=llm_cfg.get("base_url"),
+            base_url=base_url,
             max_tokens=llm_cfg.get("max_tokens", 8192),
             temperature=llm_cfg.get("temperature", 0.0),
             context_window=llm_cfg.get("context_window", 262_144),

@@ -114,12 +114,17 @@ def manifest_to_json(manifest: Manifest) -> str:
         "cross_source_relations": [],
     }
     for entry in manifest.entries:
-        # Use relative path for readability
+        # Exclude text_preview from serialization — domain text flows
+        # through _extract_domain_rules(), not through manifest_json.
+        summary = {
+            k: v for k, v in entry.summary.items()
+            if k != "text_preview"
+        }
         data["files"].append({
             "path": entry.file_path,
             "type": entry.file_type,
             "size_bytes": entry.size_bytes,
-            "summary": entry.summary,
+            "summary": summary,
         })
     for rel in manifest.cross_source_relations:
         data["cross_source_relations"].append({

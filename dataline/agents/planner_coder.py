@@ -48,6 +48,8 @@ def generate(
     state: AnalysisState | None = None,
     cm: ContextManager | None = None,
     qa_guidance: str = "",
+    iteration: int = 0,
+    max_iterations: int = 8,
 ) -> PlannerCoderOutput:
     """Generate plan + code candidates in a single LLM call.
 
@@ -55,7 +57,10 @@ def generate(
     Returns PlannerCoderOutput with plan and ordered candidates.
     """
     if state and cm:
-        prompt = _build_context_managed_prompt(state, cm, llm, qa_guidance=qa_guidance)
+        prompt = _build_context_managed_prompt(
+            state, cm, llm, qa_guidance=qa_guidance,
+            iteration=iteration, max_iterations=max_iterations,
+        )
     else:
         prompt = _build_legacy_prompt(question, manifest_json, data_profile, steps_done)
 
@@ -73,6 +78,8 @@ def _build_context_managed_prompt(
     llm: Any,
     *,
     qa_guidance: str = "",
+    iteration: int = 0,
+    max_iterations: int = 8,
 ) -> str:
     """Build budget-managed context with all information in one prompt."""
     sections = []
@@ -86,12 +93,39 @@ def _build_context_managed_prompt(
         heading="",
     ))
 
+    # Iteration budget — let LLM know where it is in the loop
+    budget_note = f"Iteration {iteration + 1} of {max_iterations}."
+    if iteration >= max_iterations - 1:
+        budget_note += " LAST ITERATION — output your best answer now."
+    elif iteration >= max_iterations - 2:
+        budget_note += " Second-to-last — prioritize a working solution."
+    sections.append(Section(
+        name="budget",
+        content=f"## Budget\n{budget_note}",
+        priority=98,
+        compressible=False,
+        heading="",
+    ))
+
     # Judge guidance — must address (second highest priority)
     if state.judge_guidance:
         sections.append(Section(
             name="judge_guidance",
             content=f"## Judge Guidance (MUST ADDRESS)\n{state.judge_guidance}",
             priority=95,
+            compressible=False,
+            heading="",
+        ))
+
+    # Harness feedback — deterministic block/warn signals (highest actionable priority)
+    if state.harness_feedback:
+        sections.append(Section(
+            name="harness_feedback",
+            content=(
+                f"## HarnessGate Feedback (DETERMINISTIC — FIX THESE)\n"
+                f"{state.harness_feedback}"
+            ),
+            priority=96,
             compressible=False,
             heading="",
         ))

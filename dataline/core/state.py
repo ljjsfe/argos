@@ -12,12 +12,9 @@ Information priority (high → low):
 
 from __future__ import annotations
 
-from ..core.types import AnalysisState, Manifest, StepRecord
+from dataclasses import replace
 
-# Safety cap for single stdout field to prevent extreme cases (e.g., printing 1M rows).
-# 200K token context ≈ 800K chars. Each agent call is independent, so no sharing.
-# This cap is generous — only catches pathological output.
-_STDOUT_SAFETY_CAP = 100_000
+from ..core.types import AnalysisState, Manifest, StepRecord
 
 
 def create_initial_state(
@@ -45,67 +42,131 @@ def create_initial_state(
 
 def set_question_analysis(state: AnalysisState, analysis: str) -> AnalysisState:
     """Return new state with question_analysis set (called once after QuestionAnalyzer)."""
-    return AnalysisState(
-        task_id=state.task_id,
-        question=state.question,
-        manifest_summary=state.manifest_summary,
-        data_profile_summary=state.data_profile_summary,
-        domain_rules=state.domain_rules,
-        question_analysis=analysis,
-        key_findings=state.key_findings,
-        variables_in_scope=state.variables_in_scope,
-        judge_guidance=state.judge_guidance,
-        completed_steps=state.completed_steps,
-        full_step_details=state.full_step_details,
-    )
+    return replace(state, question_analysis=analysis)
 
 
 def compress_manifest(manifest: Manifest) -> str:
-    """Compress manifest to schema info. Full content for documentation files."""
+    """Compress manifest to rich schema context.
+
+    Outputs per-table/file:
+    - Column list with dtype, cardinality, null%
+    - Sample rows (up to 3)
+    - DISTINCT values for low-cardinality text columns
+    - .md/doc files omitted (already in domain_rules channel)
+    """
     parts: list[str] = []
 
     for entry in manifest.entries:
         s = entry.summary
-        file_label = f"{entry.file_type}: {entry.file_path}"
+
+        # Skip documentation files — content flows via domain_rules channel
+        if entry.file_type in ("markdown", "pdf", "docx", "image"):
+            parts.append(f"[doc] {entry.file_path} ({entry.file_type})")
+            continue
 
         # Flat columns (CSV, JSON, Parquet)
         if "columns" in s:
-            cols = ", ".join(
-                f"{c.get('name', '?')}({c.get('dtype', '?')})" for c in s["columns"]
-            )
-            rows = s.get("row_count", "?")
-            parts.append(f"{file_label} [{rows} rows]: {cols}")
+            parts.append(_format_flat_table(
+                entry.file_path, s.get("row_count", "?"),
+                s["columns"], s.get("sample_rows", []),
+            ))
 
         # SQLite tables
         elif "tables" in s:
             for table in s["tables"]:
-                cols = ", ".join(
-                    f"{c.get('name', '?')}({c.get('dtype', '?')})"
-                    for c in table.get("columns", [])
+                label = f"{entry.file_path}/{table.get('name', '?')}"
+                parts.append(_format_flat_table(
+                    label, table.get("row_count", "?"),
+                    table.get("columns", []), table.get("sample_rows", []),
+                ))
+            # Foreign keys
+            for fk in s.get("foreign_keys", []):
+                parts.append(
+                    f"FK: {fk['from_table']}.{fk['from_col']} -> "
+                    f"{fk['to_table']}.{fk['to_col']}"
                 )
-                rows = table.get("row_count", "?")
-                parts.append(f"{file_label}/{table.get('name', '?')} [{rows} rows]: {cols}")
 
         # Excel sheets
         elif "sheets" in s:
             for sheet in s["sheets"]:
-                cols = ", ".join(
-                    f"{c.get('name', '?')}({c.get('dtype', '?')})"
-                    for c in sheet.get("columns", [])
-                )
-                rows = sheet.get("row_count", "?")
-                parts.append(f"{file_label}/{sheet.get('name', '?')} [{rows} rows]: {cols}")
+                label = f"{entry.file_path}/{sheet.get('name', '?')}"
+                parts.append(_format_flat_table(
+                    label, sheet.get("row_count", "?"),
+                    sheet.get("columns", []), sheet.get("sample_rows", []),
+                ))
 
-        # Text/image/other — full content (domain knowledge lives here)
+        # Other/error
         else:
-            preview = s.get("text_preview", "") or ""
-            parts.append(f"{file_label}:\n{preview}" if preview else file_label)
+            error = s.get("error", "")
+            if error:
+                parts.append(f"{entry.file_path}: ERROR {error}")
+            else:
+                parts.append(f"{entry.file_path} ({entry.file_type})")
 
     # Cross-source relations
     for rel in manifest.cross_source_relations:
-        parts.append(f"RELATION: {rel.source_a} <-> {rel.source_b}: {rel.relation} (conf={rel.confidence})")
+        parts.append(
+            f"RELATION: {rel.source_a} <-> {rel.source_b}: "
+            f"{rel.relation} (conf={rel.confidence})"
+        )
 
-    return "\n".join(parts)
+    return "\n\n".join(parts)
+
+
+def _format_flat_table(
+    label: str,
+    row_count: object,
+    columns: list[dict],
+    sample_rows: list[dict],
+) -> str:
+    """Format a single table/file with rich schema context."""
+    lines: list[str] = [f"### {label} [{row_count} rows]"]
+
+    # Column list: name(dtype, N unique) or name(dtype, null=X%)
+    col_parts: list[str] = []
+    for c in columns:
+        name = c.get("name", "?")
+        dtype = c.get("dtype", "?")
+        card = c.get("cardinality")
+        null_pct = c.get("null_pct", 0)
+
+        parts_inner = [f"{name}({dtype}"]
+        if card is not None:
+            parts_inner.append(f", {card} unique")
+        if null_pct and null_pct > 0.01:
+            parts_inner.append(f", null={round(null_pct * 100)}%")
+        col_parts.append("".join(parts_inner) + ")")
+
+    lines.append("Columns: " + ", ".join(col_parts))
+
+    # Sample rows (up to 3)
+    if sample_rows:
+        lines.append("Sample rows:")
+        for row in sample_rows[:3]:
+            row_str = " | ".join(
+                f"{k}={_compact_val(v)}" for k, v in list(row.items())[:8]
+            )
+            lines.append(f"  {row_str}")
+
+    # DISTINCT values for low-cardinality text columns
+    for c in columns:
+        dv = c.get("distinct_values")
+        if dv:
+            name = c.get("name", "?")
+            vals_str = ", ".join(f"'{v}'" for v in dv[:30])
+            lines.append(f"DISTINCT {name} ({len(dv)}): {vals_str}")
+
+    return "\n".join(lines)
+
+
+def _compact_val(v: object) -> str:
+    """Compact representation of a sample value."""
+    if v is None:
+        return "NULL"
+    s = str(v)
+    if len(s) > 60:
+        return s[:57] + "..."
+    return s
 
 
 def add_step(
@@ -131,16 +192,10 @@ def add_step(
             if not any(v[0] == pkl for v in new_vars):
                 new_vars = new_vars + ((pkl, step.plan.step_description),)
 
-    return AnalysisState(
-        task_id=state.task_id,
-        question=state.question,
-        manifest_summary=state.manifest_summary,
-        data_profile_summary=state.data_profile_summary,
-        domain_rules=state.domain_rules,
-        question_analysis=state.question_analysis,
+    return replace(
+        state,
         key_findings=state.key_findings + (finding_summary,),
         variables_in_scope=new_vars,
-        judge_guidance=state.judge_guidance,
         completed_steps=state.completed_steps + (step_line,),
         full_step_details=state.full_step_details + (step,),
     )
@@ -148,43 +203,28 @@ def add_step(
 
 def update_judge_guidance(state: AnalysisState, guidance: str) -> AnalysisState:
     """Return new state with updated judge guidance."""
-    return AnalysisState(
-        task_id=state.task_id,
-        question=state.question,
-        manifest_summary=state.manifest_summary,
-        data_profile_summary=state.data_profile_summary,
-        domain_rules=state.domain_rules,
-        question_analysis=state.question_analysis,
-        key_findings=state.key_findings,
-        variables_in_scope=state.variables_in_scope,
-        judge_guidance=guidance,
-        completed_steps=state.completed_steps,
-        full_step_details=state.full_step_details,
-    )
+    return replace(state, judge_guidance=guidance)
+
+
+def update_harness_feedback(state: AnalysisState, feedback: str) -> AnalysisState:
+    """Return new state with updated harness feedback."""
+    return replace(state, harness_feedback=feedback)
 
 
 def truncate_to_step(state: AnalysisState, step_index: int) -> AnalysisState:
-    """Backtrack: truncate state to given step index. Keep findings up to that point."""
-    return AnalysisState(
-        task_id=state.task_id,
-        question=state.question,
-        manifest_summary=state.manifest_summary,
-        data_profile_summary=state.data_profile_summary,
-        domain_rules=state.domain_rules,
-        question_analysis=state.question_analysis,
+    """Backtrack: truncate state to given step index.
+
+    Clears stale guidance/feedback to prevent misleading the next iteration.
+    Keeps variables_in_scope (pickles still on disk).
+    """
+    return replace(
+        state,
         key_findings=state.key_findings[:step_index],
-        variables_in_scope=state.variables_in_scope,  # keep all — pickles still on disk
-        judge_guidance=state.judge_guidance,
         completed_steps=state.completed_steps[:step_index],
         full_step_details=state.full_step_details[:step_index],
+        judge_guidance="",
+        harness_feedback="",
     )
-
-
-def _cap(text: str) -> str:
-    """Apply safety cap to prevent pathological output from blowing up context."""
-    if len(text) > _STDOUT_SAFETY_CAP:
-        return text[:_STDOUT_SAFETY_CAP] + f"\n... (truncated at {_STDOUT_SAFETY_CAP} chars)"
-    return text
 
 
 def summarize_step_output(stdout: str, max_len: int = 100) -> str:

@@ -37,7 +37,8 @@ def read_docx(file_path: str) -> ManifestEntry:
             summary={
                 "headings": headings[:20],
                 "key_terms": sorted(key_terms)[:20],
-                "text_preview": full_text[:1000],
+                "text_preview": full_text,
+                "char_count": len(full_text),
                 "paragraph_count": len(text_parts),
             },
         )

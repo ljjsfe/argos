@@ -84,6 +84,9 @@ def _profile_records(records: list) -> dict:
 
         columns.append(col_info)
 
+    # Full-record DISTINCT value scan for low-cardinality text columns
+    _scan_distinct_values(records, columns)
+
     return {
         "row_count": row_count,
         "columns": columns,
@@ -108,3 +111,38 @@ def _truncate(v: object, max_len: int = 100) -> object:
     if isinstance(v, str) and len(v) > max_len:
         return v[:max_len] + "..."
     return v
+
+
+_DISTINCT_LIMIT = 30  # Max unique values to enumerate
+
+
+def _scan_distinct_values(records: list, columns: list[dict]) -> None:
+    """Scan all records to compute exact cardinality and DISTINCT values.
+
+    For string columns with ≤ _DISTINCT_LIMIT unique values, stores all distinct
+    values. For all columns, stores exact cardinality and null percentage.
+    Mutates column dicts in place.
+    """
+    if not records:
+        return
+
+    total = len(records)
+    for col_info in columns:
+        key = col_info["name"]
+        all_values = [r.get(key) for r in records if isinstance(r, dict)]
+        non_null = [v for v in all_values if v is not None]
+
+        try:
+            n_unique = len(set(non_null))
+        except TypeError:
+            # Unhashable values (dicts, lists) — fall back to string comparison
+            n_unique = len(set(str(v) for v in non_null))
+        col_info["cardinality"] = n_unique
+        col_info["null_pct"] = round(1.0 - len(non_null) / max(total, 1), 3)
+
+        # Enumerate distinct values for low-cardinality string columns
+        if col_info.get("dtype") == "string" and n_unique <= _DISTINCT_LIMIT:
+            vals = sorted(set(str(v) for v in non_null))
+            # Skip if any value is very long
+            if all(len(v) <= 100 for v in vals):
+                col_info["distinct_values"] = vals

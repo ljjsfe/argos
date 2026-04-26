@@ -28,6 +28,7 @@ from ..core.state import (
     set_question_analysis,
     summarize_step_output,
     truncate_to_step,
+    update_harness_feedback,
     update_judge_guidance,
 )
 from ..core.tracer import TaskTracer
@@ -212,6 +213,8 @@ def run_task(
                     question, manifest_json, data_profile, steps_done,
                     traced_llm, state=state, cm=cm,
                     qa_guidance=qa_guidance,
+                    iteration=iteration,
+                    max_iterations=max_iterations,
                 )
             _log(trace, "planner_coder",
                  f"Plan: {pc_output.plan.step_description} | "
@@ -370,10 +373,11 @@ def run_task(
                 ]
 
             if blocking:
-                # Skip Judge — use blocking messages as guidance for next iteration
-                judge_guidance = "\n".join(
+                # Skip Judge — write block messages to harness_feedback channel
+                harness_msg = "\n".join(
                     f"[{f.rule}] {f.message}" for f in blocking
                 )
+                state = update_harness_feedback(state, harness_msg)
                 _log(trace, "harness_gate",
                      f"BLOCKED — skipping Judge, {len(blocking)} block flags")
                 iter_obs["judge_sufficient"] = False
@@ -382,6 +386,10 @@ def run_task(
 
                 prev_guidance = judge_guidance
                 continue
+
+            # Clear harness_feedback when not blocked (judge will evaluate)
+            if state.harness_feedback:
+                state = update_harness_feedback(state, "")
 
             # ── Judge: sufficiency + routing + guidance ──
             with tracer.span("judge", metadata={"iteration": iteration}):
@@ -465,6 +473,7 @@ def run_task(
                     )
                     stagnation_count = 0
                     state = set_question_analysis(state, "")
+                    qa_guidance = ""  # clear local var to match state
 
         # ─── Stage 5: Finalizer ───
         with tracer.span("finalizer"):

@@ -236,15 +236,30 @@ def _compression_target(
     return max(target, minimum)
 
 
+_CHUNK_CHAR_LIMIT = 50_000  # Max chars per LLM summarization call
+
+
 def _llm_summarize(
     section: Section, content: str, target_tokens: int, llm: object,
 ) -> str | None:
     """Use LLM to summarize a section to fit within target_tokens.
 
+    For content > _CHUNK_CHAR_LIMIT chars, splits by headings, summarizes
+    each chunk independently, and merges results.
+
     Returns None if summarization fails or LLM is unavailable.
     """
+    if len(content) > _CHUNK_CHAR_LIMIT:
+        return _llm_summarize_chunked(section, content, target_tokens, llm)
+    return _llm_summarize_single(section.name, content, target_tokens, llm)
+
+
+def _llm_summarize_single(
+    name: str, content: str, target_tokens: int, llm: object,
+) -> str | None:
+    """Summarize a single chunk via LLM."""
     try:
-        target_chars = target_tokens * 4  # rough token-to-char for output guidance
+        target_chars = target_tokens * 4
         prompt = (
             f"Summarize the following content to approximately {target_chars} characters. "
             f"Preserve ALL exact numbers, formulas, field names, and definitions. "
@@ -257,8 +272,61 @@ def _llm_summarize(
         if result and len(result.strip()) > 20:
             return result.strip()
     except Exception as exc:
-        logger.debug("LLM summarization failed for '%s': %s", section.name, exc)
+        logger.debug("LLM summarization failed for '%s': %s", name, exc)
     return None
+
+
+def _llm_summarize_chunked(
+    section: Section, content: str, target_tokens: int, llm: object,
+) -> str | None:
+    """Split large content by headings, summarize each chunk, merge."""
+    # Split by H1-H3 headings
+    parts = re.split(r"(?=^#{1,3}\s)", content, flags=re.MULTILINE)
+    parts = [p for p in parts if p.strip()]
+
+    # Merge small parts into chunks under the limit
+    chunks: list[str] = []
+    current = ""
+    for part in parts:
+        if len(current) + len(part) > _CHUNK_CHAR_LIMIT and current:
+            chunks.append(current)
+            current = part
+        else:
+            current += part
+    if current:
+        chunks.append(current)
+
+    # Fallback: hard split if single chunk still too large
+    final_chunks: list[str] = []
+    for chunk in chunks:
+        if len(chunk) > _CHUNK_CHAR_LIMIT:
+            for i in range(0, len(chunk), _CHUNK_CHAR_LIMIT):
+                final_chunks.append(chunk[i:i + _CHUNK_CHAR_LIMIT])
+        else:
+            final_chunks.append(chunk)
+
+    # Allocate target tokens proportionally across chunks
+    total_chars = sum(len(c) for c in final_chunks)
+    summaries: list[str] = []
+
+    for chunk in final_chunks:
+        chunk_target = max(int(target_tokens * len(chunk) / max(total_chars, 1)), 100)
+        summary = _llm_summarize_single(section.name, chunk, chunk_target, llm)
+        if summary:
+            summaries.append(summary)
+        else:
+            # Fallback: smart-truncate this chunk
+            summaries.append(_smart_truncate(chunk, chunk_target))
+
+    if not summaries:
+        return None
+
+    result = "\n\n".join(summaries)
+    logger.info(
+        "Chunked summarization for '%s': %d chars → %d chars (%d chunks)",
+        section.name, len(content), len(result), len(final_chunks),
+    )
+    return result
 
 
 def _smart_truncate(text: str, target_tokens: int) -> str:

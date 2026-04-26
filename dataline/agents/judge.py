@@ -121,7 +121,7 @@ def _build_sections(state: AnalysisState) -> list[Section]:
     if state.question_analysis:
         sections.append(Section(
             "question_analysis", state.question_analysis,
-            priority=55, compressible=True,
+            priority=75, compressible=True,
             heading="## Question Analysis (expected strategy — use to audit code logic)",
         ))
 
@@ -172,7 +172,7 @@ def _build_sections(state: AnalysisState) -> list[Section]:
     if state.judge_guidance:
         sections.append(Section(
             "prior_guidance", state.judge_guidance,
-            priority=50, heading="## Prior Guidance",
+            priority=70, heading="## Prior Guidance",
         ))
 
     return sections

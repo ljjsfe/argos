@@ -65,10 +65,10 @@ def discover_relations(entries: list[ManifestEntry]) -> list[CrossSourceRelation
         if not sample_values:
             continue
         for text_entry in text_entries:
-            text_preview = text_entry.summary.get("text_preview", "")
-            if not text_preview:
+            text_content = _read_text_content(text_entry)
+            if not text_content:
                 continue
-            matches = [v for v in sample_values if str(v) in text_preview]
+            matches = [v for v in sample_values if str(v) in text_content]
             if matches:
                 relations.append(CrossSourceRelation(
                     source_a=struct_entry.file_path,
@@ -78,6 +78,23 @@ def discover_relations(entries: list[ManifestEntry]) -> list[CrossSourceRelation
                 ))
 
     return relations
+
+
+def _read_text_content(entry: ManifestEntry) -> str:
+    """Read text content from a document entry.
+
+    Markdown: reads file directly from disk (no text_preview in summary).
+    PDF/DOCX: uses text_preview from summary (extracted text from their readers).
+    Returns empty string if content is unavailable.
+    """
+    if entry.file_type == "markdown":
+        try:
+            with open(entry.file_path, "r", encoding="utf-8") as f:
+                return f.read()
+        except (OSError, UnicodeDecodeError):
+            return ""
+
+    return entry.summary.get("text_preview", "")
 
 
 def _get_column_names(entry: ManifestEntry) -> set[str]:
@@ -184,7 +201,7 @@ def _check_temporal_alignment(entries: list[ManifestEntry]) -> list[CrossSourceR
 
     for entry in entries:
         s = entry.summary
-        all_columns = s.get("columns", [])
+        all_columns = list(s.get("columns", []))
         for table in s.get("tables", []):
             all_columns.extend(table.get("columns", []))
         for sheet in s.get("sheets", []):

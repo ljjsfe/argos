@@ -99,17 +99,6 @@ def extract_column_references(code: str) -> list[str]:
     return columns
 
 
-def get_column_context(col_name: str, manifest: Manifest) -> str:
-    """Return value representation for a specific column from manifest entries."""
-    for entry in manifest.entries:
-        for col in _get_columns_from_entry(entry):
-            if col.get("name", "") == col_name:
-                vr = col.get("value_repr", {})
-                if vr:
-                    return f"{col_name}: {vr}"
-    return ""
-
-
 def _collect_all_columns(manifest: Manifest) -> set[str]:
     """Collect all column names from all entries in the manifest."""
     columns: set[str] = set()
