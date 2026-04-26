@@ -66,6 +66,28 @@ def safe_read_json(
         return json.load(f)
 
 
+def safe_read_json_df(
+    filename: str,
+    task_dir: str | None = None,
+) -> pd.DataFrame:
+    """Read JSON file and return a DataFrame.
+
+    Auto-unwraps nested ``{"table": "...", "records": [...]}`` structures.
+    Falls back to ``pd.DataFrame(data)`` for flat list-of-dicts JSON.
+    """
+    data = safe_read_json(filename, task_dir)
+    if isinstance(data, list) and data and isinstance(data[0], dict):
+        return pd.DataFrame(data)
+    if isinstance(data, dict):
+        record_arrays = [
+            (k, v) for k, v in data.items()
+            if isinstance(v, list) and len(v) > 0 and isinstance(v[0], dict)
+        ]
+        if len(record_arrays) == 1:
+            return pd.DataFrame(record_arrays[0][1])
+    return pd.DataFrame(data)
+
+
 def safe_read_excel(
     filename: str,
     task_dir: str | None = None,

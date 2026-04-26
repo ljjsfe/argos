@@ -14,9 +14,8 @@ Format the final answer from the completed analysis.
 5. Clean numbers: no $ or % unless the question specifically asks for formatted values.
 6. Remove extra whitespace from string values.
 7. If the question asks for a single value, still format as: {"columns": {"answer": [value]}}
-8. Use the LAST successful step's output as the primary data source. Earlier steps may have been exploratory.
-9. Copy numbers exactly as they appear in the step output — do not add extra rounding or truncate digits. The scorer normalizes all numeric values to 2 decimal places automatically, so precise copying is sufficient; you do not need to round manually.
-10. If a step produced a WARNING about 0 rows or empty results, do NOT use that step's output — look for earlier valid results.
+8. Use the LAST successful step's output as the primary data source. Earlier steps may have been exploratory. **Exception**: if the last step produced a WARNING about 0 rows or empty results, do NOT use it — fall back to the most recent step that produced valid, non-empty results.
+9. Copy numbers exactly as they appear in the step output — do not add extra rounding or truncate digits. The scorer normalizes all numeric values to 2 decimal places automatically. **However**, strip formatting characters ($, %, unit suffixes) unless the question explicitly asks for formatted values (Rule 5 takes priority).
 11. If the question asks multiple sub-questions (e.g., "What is X and Y?", "Find A, B, and C"), your output MUST have a separate column or value for EACH sub-question. Never merge multiple answers into a single column.
 12. All lists in the output MUST have the same length. A table with mismatched column lengths is invalid.
 13. "Not Applicable" rules — distinguish two cases:
@@ -27,8 +26,8 @@ Format the final answer from the completed analysis.
     - If the question asks for a summary (e.g., "total count", "average fee"), output a single scalar — do NOT output the underlying records.
     - Never conflate record-level output with aggregate output.
 15. Do NOT output a raw DataFrame or Python repr as the answer. The answer must contain the actual computed values — numbers, strings, or identifiers — not a formatted table printout with alignment spaces and index columns.
-16. PRESERVE COLUMN SEPARATION: if the source data produces values in separate columns, keep them as separate columns in the output. Do NOT merge values from distinct source columns into one column. Exception: if the question explicitly asks for a combined or formatted value, combining is correct.
-17. OUTPUT TYPE GUIDANCE: if the Question Analysis above specifies `output_type` for each sub-question (scalar / list / table), use it to verify your structure. A scalar sub-question must produce a single value column. A list sub-question must produce one row per entity. A table sub-question must preserve all requested dimensions as separate columns.
+16. NAME COLUMNS: the scorer accepts both formats — separate `first_name`/`last_name` columns OR a single merged `full_name` column. Use whichever format the step output provides; do not reshape.
+17. OUTPUT TYPE GUIDANCE: if the Question Analysis above specifies `answer_type` (scalar / list / table), use it to verify your structure. A scalar answer must produce a single value column. A list answer must produce one row per entity. A table answer must preserve all requested dimensions as separate columns.
 18. COLUMN SCOPE — CRITICAL: if "Required Column Structure" is listed above, output ONLY those columns. Do NOT add extra explanation columns, intermediate computation columns, metadata columns, or index columns. Every extra column that has no matching gold column reduces your score.
 
 ## Output (JSON only, no other text)

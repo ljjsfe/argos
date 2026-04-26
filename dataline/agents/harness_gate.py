@@ -6,8 +6,9 @@ Severity levels:
 - "block": skip Judge, use message as guidance for next iteration
 - "warn":  pass to Judge as reference information
 
-Block fatigue (in orchestrator): same rule blocking ≥3 consecutive times
-→ downgraded to warn so Judge can accept partial results.
+Only ``nan_answer`` uses BLOCK (data-validated: 2/2 truly needed).
+All other rules use WARN — cross-run analysis showed BLOCK on other rules
+has net-negative effect (wastes iteration budget without improving scores).
 
 If no flags → normal Judge flow.
 """
@@ -133,7 +134,6 @@ def _check_shape(
     is_scalar_q = any(re.search(p, q_lower) for p in _SCALAR_PATTERNS)
 
     rows = _count_answer_rows(structured_json)
-    cols = _count_answer_cols(structured_json)
 
     # --- Row checks ---
     if rows is not None:
@@ -141,7 +141,7 @@ def _check_shape(
         if is_scalar_q and rows > 5:
             flags.append(HarnessFlag(
                 rule="output_shape",
-                severity="block",
+                severity="warn",
                 message=(
                     f"Scalar question but answer has {rows} rows. "
                     f"Expected a single aggregated value. Add aggregation "
@@ -153,7 +153,7 @@ def _check_shape(
               and not is_scalar_q):
             flags.append(HarnessFlag(
                 rule="output_shape",
-                severity="block",
+                severity="warn",
                 message=(
                     f"Expected single-row answer but answer has {rows} rows. "
                     f"Add aggregation to reduce to one result."
@@ -169,39 +169,22 @@ def _check_shape(
                     "Verify the query isn't over-aggregating."
                 ),
             ))
-        # Scalar answer type with multiple rows (non-tie)
-        elif (spec.answer_type == "scalar" and rows > 1
+        # Scalar answer type with many rows (non-tie) — threshold matches
+        # other scalar checks (>5) to avoid flagging legitimate 2-3 row results
+        elif (spec.answer_type == "scalar" and rows > 5
               and not spec.tie_possible and not is_scalar_q):
             flags.append(HarnessFlag(
                 rule="output_shape",
-                severity="block",
+                severity="warn",
                 message=(
                     f"Expected scalar answer but got {rows} rows. "
-                    f"Reduce to a single aggregated value."
+                    f"Verify whether multiple results are valid (ties/multiple matches) "
+                    f"before aggregating."
                 ),
             ))
 
-    # --- Column checks ---
-    if cols is not None:
-        # Scalar question with multiple columns
-        if is_scalar_q and cols > 1:
-            flags.append(HarnessFlag(
-                rule="output_shape",
-                severity="block",
-                message=(
-                    f"Scalar question but answer has {cols} columns. "
-                    f"Expected 1 column. Remove extra columns."
-                ),
-            ))
-        elif spec.answer_type == "scalar" and cols > 1 and not is_scalar_q:
-            flags.append(HarnessFlag(
-                rule="output_shape",
-                severity="block",
-                message=(
-                    f"Expected scalar answer but got {cols} columns. "
-                    f"Reduce to 1 column."
-                ),
-            ))
+    # Column count checks handled by _check_qa_column_count() which uses
+    # the more precise expected_column_count from QuestionAnalyzer.
 
     return flags
 
@@ -227,7 +210,7 @@ def _check_join_cardinality(stdout: str) -> list[HarnessFlag]:
     if max_loaded > 0 and max_joined > max_loaded * 10:
         return [HarnessFlag(
             rule="join_cardinality",
-            severity="block",
+            severity="warn",
             message=(
                 f"JOIN row explosion: loaded {max_loaded} rows but "
                 f"post-JOIN has {max_joined} rows ({max_joined // max(max_loaded, 1)}x). "
@@ -262,7 +245,7 @@ def _check_empty_output(question: str, stdout: str) -> list[HarnessFlag]:
         return []
     return [HarnessFlag(
         rule="empty_output",
-        severity="block",
+        severity="warn",
         message=(
             "Output appears empty (0 rows / empty DataFrame). "
             "Check filter conditions, column names, and data types. "
@@ -309,46 +292,8 @@ def _check_row_count_bound(
 
 
 # ---------------------------------------------------------------------------
-# Rule 7: Column merge detection
+# Rule 7: (removed — official rules accept both split and merged name columns)
 # ---------------------------------------------------------------------------
-
-_COMPOSITE_COLUMNS: dict[str, list[str]] = {
-    "full_name": ["first_name", "last_name"],
-    "fullname": ["firstname", "lastname"],
-    "name": ["first_name", "last_name"],
-    "full_address": ["street", "city", "state", "zip"],
-    "address": ["street", "city"],
-}
-
-
-def _check_column_merge(code: str, structured_json: str) -> list[HarnessFlag]:
-    if not structured_json:
-        return []
-    try:
-        data = json.loads(structured_json)
-        answer = data.get("answer", {})
-        if not isinstance(answer, dict):
-            return []
-    except (json.JSONDecodeError, ValueError):
-        return []
-
-    answer_keys_lower = {k.lower() for k in answer}
-    code_lower = code.lower()
-    flags: list[HarnessFlag] = []
-
-    for composite, parts in _COMPOSITE_COLUMNS.items():
-        if composite in answer_keys_lower:
-            if all(part in code_lower for part in parts):
-                flags.append(HarnessFlag(
-                    rule="column_merge",
-                    severity="block",
-                    message=(
-                        f"Answer has merged column '{composite}' but code "
-                        f"references {parts}. Scorer matches columns "
-                        f"independently — keep them as separate columns."
-                    ),
-                ))
-    return flags
 
 
 # ---------------------------------------------------------------------------
@@ -384,7 +329,7 @@ def _check_extra_columns(
         if any(re.match(p, col_lower) for p in _DEBUG_COLUMN_PATTERNS):
             flags.append(HarnessFlag(
                 rule="extra_columns",
-                severity="block",
+                severity="warn",
                 message=(
                     f"Answer contains debug/index column '{col_name}'. "
                     f"Remove it — extra columns reduce score "
@@ -446,7 +391,7 @@ def _check_empty_answer(
                 return []
             return [HarnessFlag(
                 rule="empty_answer",
-                severity="block",
+                severity="warn",
                 message=(
                     f"Answer is a placeholder value ('{val_str[:50]}'). "
                     f"The computation likely failed or returned no result. "
@@ -490,7 +435,7 @@ def _check_dict_string_answer(structured_json: str) -> list[HarnessFlag]:
             if isinstance(v, str) and _DICT_STRING_RE.match(v.strip()):
                 return [HarnessFlag(
                     rule="dict_string_answer",
-                    severity="block",
+                    severity="warn",
                     message=(
                         f"Column '{col}' value looks like a Python dict string: "
                         f"'{v[:80]}'. "
@@ -625,14 +570,14 @@ def _check_qa_column_count(
     if actual < expected:
         return [HarnessFlag(
             rule="qa_column_count",
-            severity="block",
+            severity="warn",
             message=(
                 f"Expected {expected} columns but answer has {actual}. "
                 f"Missing columns will reduce recall score."
             ),
         )]
     if actual > expected:
-        severity = "block" if actual >= expected * 3 else "warn"
+        severity = "warn"
         return [HarnessFlag(
             rule="qa_column_count",
             severity=severity,
@@ -690,7 +635,7 @@ def _check_scalar_range(
         if value < 0 or value > 100:
             flags.append(HarnessFlag(
                 rule="scalar_range",
-                severity="block",
+                severity="warn",
                 message=(
                     f"Percentage question but value is {value} "
                     f"(expected 0-100). Check calculation."
@@ -711,7 +656,7 @@ def _check_scalar_range(
         if value < 0:
             flags.append(HarnessFlag(
                 rule="scalar_range",
-                severity="block",
+                severity="warn",
                 message=f"Count question but value is negative ({value}).",
             ))
         # Check against source table size
@@ -721,7 +666,7 @@ def _check_scalar_range(
             if max_source > 0 and value > max_source * 2:
                 flags.append(HarnessFlag(
                     rule="scalar_range",
-                    severity="block",
+                    severity="warn",
                     message=(
                         f"Count is {value} but largest source table has "
                         f"{max_source} rows. Count exceeds 2x source size."
@@ -822,7 +767,7 @@ def check(
     flags.extend(_check_join_cardinality(stdout))
     flags.extend(_check_empty_output(question, stdout))
     flags.extend(_check_row_count_bound(stdout, data_profile))
-    flags.extend(_check_column_merge(code, structured_json))
+    # Rule 7 (column_merge) removed — official rules accept both name formats
     flags.extend(_check_extra_columns(structured_json))
     flags.extend(_check_empty_answer(question, structured_json))
     flags.extend(_check_dict_string_answer(structured_json))

@@ -75,16 +75,17 @@ Finalizer → prediction.csv + trace.json
 | Profiler is zero LLM cost | Deterministic, testable, saves tokens |
 | No framework (no LangChain) | ~3000 lines of Python, no overhead |
 | Immutable data types | Frozen dataclasses only, no mutation |
-| Kimi (Moonshot) primary LLM | OpenAI-compatible API |
+| Qwen3.5-35B-A3B primary LLM | Official eval model; MoE 35B/3B-active, 262K context |
 
 ---
 
 ## LLM Configuration
 
-- **Primary**: Moonshot/Kimi — `kimi-latest`, `https://api.moonshot.cn/v1`
-- **API key env**: `MOONSHOT_API_KEY`
-- **Fallback providers**: anthropic, openai, deepseek (all via same `LLMClient` interface)
-- **Config file**: `config.yaml`
+- **Eval model**: Qwen3.5-35B-A3B (MoE, 35B total / 3B active params, 262K context)
+- **Dev access**: DashScope — `qwen3.5-35b-a3b`, `https://dashscope.aliyuncs.com/compatible-mode/v1`
+- **Eval runtime**: Model served externally via vLLM; agent reads `MODEL_API_URL`, `MODEL_API_KEY`, `MODEL_NAME` from **environment variables** (must not hardcode)
+- **Config file**: `config.yaml` (dev defaults; env vars override at eval time)
+- **Prompt implications**: 3B active params = small model. Prompts must be concise, explicit, low-ambiguity. Complex multi-step instructions degrade fast.
 
 ---
 
@@ -141,6 +142,60 @@ main.py            # CLI entry point
 | DABstep | 10 dev + full test | Financial payments, scalar answers |
 
 Scoring: `Score = Recall − λ × (Extra Columns / Predicted Columns)`. Extra columns ARE penalized. Column names ignored; values matched by content (sorted), case-sensitive, ROUND_HALF_UP 2dp.
+
+---
+
+## Official Eval Constraints (KDD Cup 2026)
+
+Source: https://dataagent.top/rules (retrieved 2026-04-25)
+
+### Hardware & Runtime
+| Resource | Limit |
+|----------|-------|
+| CPU | 16 vCPU (x86-64) |
+| RAM | 64 GB (OOM kill) |
+| GPU | **None** |
+| Total runtime | **12 hours for ~400 tasks** (~108s avg/task) |
+| Network | **No external internet**; only internal MODEL_API_URL |
+
+### Time Budget — Critical Design Constraint
+12h / 400 tasks = ~108s per task average. Current architecture (max 8 iterations × LLM calls) can easily burn 5-10 min per task. **Must implement**:
+- Fast path for easy/medium tasks (1-2 iterations)
+- Adaptive iteration budget based on difficulty
+- Fail-fast: write best-so-far prediction.csv and move on (partial results still score)
+
+### Environment Variables (injected at eval)
+```
+MODEL_API_URL   — internal Qwen3.5-35B-A3B endpoint
+MODEL_API_KEY   — auth key
+MODEL_NAME      — "qwen3.5-35b-a3b"
+```
+`llm_client.py` MUST read these from env, falling back to config.yaml for dev.
+
+### Input Directory Structure
+```
+/input/task_<id>/
+├── task.json          # {"task_id", "difficulty", "question"}
+└── context/
+    ├── csv/           # optional
+    ├── db/            # optional (SQLite)
+    ├── json/          # optional
+    ├── doc/           # optional (markdown/docs)
+    └── knowledge.md   # optional (business rules)
+```
+**Subdirectories are NOT fixed** — agent must dynamically detect what exists.
+
+### Output
+`/output/task_<id>/prediction.csv` — UTF-8, header row, column names ignored by scorer.
+
+### Submission
+- Docker image ≤ 10 GB, all dependencies pre-installed (no network at runtime)
+- Max 1 submission/day, 30 total for Phase 1
+- Already-written prediction.csv files score even if agent crashes/times out later
+
+### Phase 2 Changes
+- Harder data + **image and video modalities** added
+- Still no GPU — image handling must be CPU-based (e.g., pytesseract OCR)
 
 ---
 
