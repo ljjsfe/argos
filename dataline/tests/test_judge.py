@@ -16,8 +16,6 @@ from dataline.core.state import (
     create_initial_state,
     update_judge_guidance,
 )
-
-
 def _make_manifest() -> Manifest:
     return Manifest(
         entries=(
@@ -63,17 +61,15 @@ def _make_state_with_steps(n_steps: int = 1) -> AnalysisState:
 class TestJudgeDecision:
     def test_immutable(self):
         decision = JudgeDecision(
-            sufficient=True,
             action="finish",
             reasoning="All parts answered",
         )
-        assert decision.sufficient is True
         assert decision.action == "finish"
         with pytest.raises(AttributeError):
-            decision.sufficient = False  # type: ignore[misc]
+            decision.action = "continue"  # type: ignore[misc]
 
     def test_defaults(self):
-        decision = JudgeDecision(sufficient=False, action="continue")
+        decision = JudgeDecision(action="continue")
         assert decision.reasoning == ""
         assert decision.missing == ""
         assert decision.guidance_for_next_step == ""
@@ -81,7 +77,6 @@ class TestJudgeDecision:
 
     def test_guidance_field(self):
         decision = JudgeDecision(
-            sufficient=False,
             action="continue",
             guidance_for_next_step="Filter payments by merchant before computing average",
         )
@@ -89,7 +84,6 @@ class TestJudgeDecision:
 
     def test_backtrack_with_truncate(self):
         decision = JudgeDecision(
-            sufficient=False,
             action="backtrack",
             truncate_to=2,
             reasoning="Step 3 used wrong filter",
@@ -107,4 +101,26 @@ class TestGuidanceIntegration:
         state = _make_state_with_steps(1)
         guidance = "Next: filter by card_scheme='GlobalCard' and compute weighted average"
         state = update_judge_guidance(state, guidance)
-        assert state.judge_guidance == guidance
+        assert guidance in state.judge_guidance
+
+    def test_guidance_append(self):
+        """Multiple guidance records are appended, capped at 3."""
+        state = _make_state_with_steps(1)
+        state = update_judge_guidance(state, "First guidance")
+        state = update_judge_guidance(state, "Second guidance")
+        state = update_judge_guidance(state, "Third guidance")
+        assert "First guidance" in state.judge_guidance
+        assert "Third guidance" in state.judge_guidance
+
+        # Fourth should evict the first
+        state = update_judge_guidance(state, "Fourth guidance")
+        assert "First guidance" not in state.judge_guidance
+        assert "Second guidance" in state.judge_guidance
+        assert "Fourth guidance" in state.judge_guidance
+
+    def test_guidance_clear_on_empty(self):
+        """Empty guidance clears all records."""
+        state = _make_state_with_steps(1)
+        state = update_judge_guidance(state, "Some guidance")
+        state = update_judge_guidance(state, "")
+        assert state.judge_guidance == ""

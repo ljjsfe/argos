@@ -1,14 +1,15 @@
 """Orchestrator: unified loop coordinating all agents.
 
-Pipeline (v18 — deterministic fixes + Judge re-enable):
+Pipeline (v19 — reliability upgrade):
   Profiler → DomainRules → QuestionSpec(deterministic)
   → Loop(PlannerCoder → Sandbox → HarnessGate → Judge) → Finalizer
 
-Key design (v18):
+Key design (v19):
 - Four-tier exit: BLOCK → retry, WARN+iter0 → soft-retry, PASS → Judge → accept/retry
-- 7 BLOCK rules (100% precision): nan, empty_output, empty_answer, dict_string,
-  value_embellishment, error_string_answer, excuse_answer
+- BLOCK rules (100% precision): nan (per-column), empty_output, empty_answer,
+  dict_string, value_embellishment, error_string_answer, excuse_answer
 - BLOCK never downgrades — known-bad answers never accepted
+- Repeated WARN escalation: whitelisted rules escalate to BLOCK after ≥3 fires
 - Code failure (rc!=0) skips to next iteration, not accepted
 - Judge (1 LLM call) provides semantic verification after HarnessGate PASS
 - Best clean result tracked for fallback on max_iterations exhaustion
@@ -30,6 +31,7 @@ from ..core.state import (
     add_step,
     create_initial_state,
     set_question_analysis,
+    set_task_mode,
     summarize_step_output,
     truncate_to_step,
     update_harness_feedback,
@@ -169,10 +171,18 @@ def run_task(
             "tie_possible": question_spec.tie_possible,
         }
 
+        # ─── Stage 3c: Deterministic task routing (zero LLM) ───
+        task_mode = _route_task(manifest, domain_rules)
+        state = set_task_mode(state, task_mode)
+        _log(trace, "task_router", f"Task mode: {task_mode}")
+        obs["task_mode"] = task_mode
+
         # Track execution state
         steps_done: list[StepRecord] = []
         # Best non-blocked result for fallback when max_iterations exhausted
         best_clean_result: tuple[StepRecord, str, SandboxResult] | None = None
+        # Track per-rule WARN counts for escalation
+        warn_counts: dict[str, int] = {}  # rule_name → consecutive count
 
         # ─── Stage 4: Unified Loop ───
         for iteration in range(max_iterations):
@@ -327,6 +337,43 @@ def run_task(
             # ── Classify flags (no fatigue downgrade — BLOCKs stay BLOCKs) ──
             blocking = [f for f in harness_flags if f.severity == "block"]
             warnings = [f for f in harness_flags if f.severity == "warn"]
+            weak_column_rules = {"qa_column_count", "sql_column_count"}
+
+            # ── WARN escalation: whitelisted rules → BLOCK after ≥3 fires ──
+            _ESCALATION_WHITELIST = {
+                "agg_type",
+            }
+            # Update counts for current warnings
+            current_warn_rules = {f.rule for f in warnings}
+            for rule in current_warn_rules:
+                warn_counts[rule] = warn_counts.get(rule, 0) + 1
+            # Reset counts for rules not firing this iteration
+            for rule in list(warn_counts):
+                if rule not in current_warn_rules:
+                    warn_counts[rule] = 0
+
+            # Escalate
+            escalated: list[HarnessFlag] = []
+            remaining_warnings: list[HarnessFlag] = []
+            for f in warnings:
+                if (f.rule in _ESCALATION_WHITELIST
+                        and warn_counts.get(f.rule, 0) >= 3):
+                    escalated.append(HarnessFlag(
+                        rule=f.rule,
+                        severity="block",
+                        message=_escalated_harness_message(
+                            f, warn_counts[f.rule], question_spec,
+                        ),
+                    ))
+                else:
+                    remaining_warnings.append(f)
+
+            if escalated:
+                blocking = blocking + escalated
+                warnings = remaining_warnings
+                _log(trace, "harness_gate",
+                     f"Escalated {len(escalated)} repeated WARNs to BLOCK: "
+                     f"{[f.rule for f in escalated]}")
 
             if harness_flags:
                 flag_summary = "; ".join(
@@ -338,6 +385,8 @@ def run_task(
                     {"rule": f.rule, "severity": f.severity, "message": f.message}
                     for f in harness_flags
                 ]
+                if escalated:
+                    iter_obs["escalated_warns"] = [f.rule for f in escalated]
 
             if blocking:
                 # Known-bad answer — retry without Judge
@@ -354,14 +403,20 @@ def run_task(
             # ── Track best non-blocked result for fallback ──
             best_clean_result = (step_record, winning_code, result)
 
+            actionable_warnings = [
+                f for f in warnings if f.rule not in weak_column_rules
+            ]
+
             # ── WARN soft-retry: retry once on first iteration ──
-            if warnings and iteration == 0:
+            # Column-count warnings are weak evidence from regex heuristics;
+            # do not let them drive loop control or rewrite attempts.
+            if actionable_warnings and iteration == 0:
                 harness_msg = "\n".join(
-                    f"[{f.rule}] {f.message}" for f in warnings
+                    f"[{f.rule}] {f.message}" for f in actionable_warnings
                 )
                 state = update_harness_feedback(state, harness_msg)
                 _log(trace, "harness_gate",
-                     f"WARN soft-retry — {len(warnings)} warnings, retrying once")
+                     f"WARN soft-retry — {len(actionable_warnings)} warnings, retrying once")
                 iter_obs["judge_action"] = "continue (warn_soft_retry)"
                 obs["iterations"].append(iter_obs)
                 continue
@@ -377,6 +432,7 @@ def run_task(
                     iteration=iteration,
                     max_iterations=max_iterations,
                     harness_warnings=warnings,
+                    question_spec=question_spec,
                 )
 
             _log(trace, "judge",
@@ -403,9 +459,12 @@ def run_task(
                 state = update_judge_guidance(
                     state, judge_decision.guidance_for_next_step,
                 )
-            if warnings:
+            actionable_warnings = [
+                f for f in warnings if f.rule not in weak_column_rules
+            ]
+            if actionable_warnings:
                 warn_msg = "\n".join(
-                    f"[{f.rule}] {f.message}" for f in warnings
+                    f"[{f.rule}] {f.message}" for f in actionable_warnings
                 )
                 state = update_harness_feedback(state, warn_msg)
 
@@ -428,6 +487,7 @@ def run_task(
                 question, steps_done, traced_llm,
                 state=state, cm=cm, benchmark=benchmark,
                 guidelines=guidelines,
+                question_spec=question_spec,
             )
         _log(trace, "finalizer", f"Answer columns: {list(answer.keys())}")
 
@@ -492,6 +552,53 @@ def run_task(
         sandbox.cleanup()
 
 
+# ---------------------------------------------------------------------------
+# Deterministic task routing
+# ---------------------------------------------------------------------------
+
+def _route_task(manifest: Manifest, domain_rules: str) -> str:
+    """Deterministic task routing based on manifest structure.
+
+    Returns a task_mode string. Zero LLM cost.
+    """
+    structured = [
+        e for e in manifest.entries
+        if e.file_type in ("csv", "json", "sqlite", "excel", "parquet")
+    ]
+    unstructured = [
+        e for e in manifest.entries
+        if e.file_type in ("markdown", "pdf", "docx")
+    ]
+
+    has_structured = len(structured) > 0
+    has_unstructured = len(unstructured) > 0
+    multi_table = len(structured) > 1 or any(
+        len(e.summary.get("tables", [])) > 1 for e in structured
+    )
+
+    # Unstructured files present → Python extraction likely needed
+    if has_unstructured and not has_structured:
+        return "python_extract"
+
+    # Multiple structured sources with cross-source relations → multi SQL
+    if multi_table and len(manifest.cross_source_relations) > 0:
+        return "multi_sql"
+
+    # Multiple structured but no detected relations → still multi SQL
+    if multi_table:
+        return "multi_sql"
+
+    # Single structured source + domain docs → note docs available
+    if has_structured and domain_rules:
+        return "document_needed"
+
+    # Default: single SQL
+    if has_structured:
+        return "single_sql"
+
+    return "general"
+
+
 def _detect_language(code: str, planner_hint: str) -> str:
     """Detect whether a candidate is raw SQL or a Python script.
 
@@ -523,6 +630,58 @@ def _detect_language(code: str, planner_hint: str) -> str:
             return "sql"
 
     return "python"
+
+
+def _escalated_harness_message(
+    flag: HarnessFlag,
+    count: int,
+    question_spec: Any,
+) -> str:
+    """Replace repeated weak feedback with a concrete required change."""
+    prefix = f"[ESCALATED — same warning {count}x] "
+    qtype = getattr(question_spec, "computation_type", "unknown")
+
+    if flag.rule == "agg_type":
+        extra = ""
+        if qtype != "ratio":
+            extra = " Do NOT multiply by 100 unless the question asks for a percentage."
+        return (
+            prefix
+            + "CRITICAL: change the aggregation, do not repeat the same query. "
+            + flag.message
+            + " If the question asks for average/mean, use AVG(...) or .mean(), "
+            + "not SUM(...)."
+            + extra
+        )
+
+    if flag.rule == "qa_column_count":
+        return (
+            prefix
+            + "CRITICAL: the answer column count is wrong. Return ONLY the "
+            + "columns directly requested by the question; move join keys, "
+            + "metrics used only for sorting, and debug fields out of answer."
+            + " "
+            + flag.message
+        )
+
+    if flag.rule == "join_cardinality":
+        return (
+            prefix
+            + "CRITICAL: the join appears to multiply rows. Use a different "
+            + "join key, cast key types to match, or pre-aggregate/deduplicate "
+            + "before joining. "
+            + flag.message
+        )
+
+    if flag.rule == "sql_where_value":
+        return (
+            prefix
+            + "CRITICAL: the filter value does not match known values. Inspect "
+            + "distinct values and use the exact spelling/case from the data. "
+            + flag.message
+        )
+
+    return prefix + flag.message
 
 
 def _log(trace: list[dict], agent: str, message: str) -> None:

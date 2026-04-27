@@ -1,12 +1,13 @@
 """Auto-discover entity relations across data sources.
 
-Enhanced with value-based join validation (not just column name overlap).
+Enhanced with value-based join validation (not just column name overlap)
+and cross-name FK discovery (e.g. sets.themeId → themes.id).
 """
 
 from __future__ import annotations
 
 from ..core.types import CrossSourceRelation, ManifestEntry
-from .join_validator import validate_join_keys
+from .join_validator import discover_cross_name_fks, validate_join_keys
 
 
 def discover_relations(entries: list[ManifestEntry]) -> list[CrossSourceRelation]:
@@ -59,6 +60,24 @@ def discover_relations(entries: list[ManifestEntry]) -> list[CrossSourceRelation
     # 1c. Temporal alignment across sources
     relations.extend(_check_temporal_alignment(structured))
 
+    # 1d. Cross-name FK discovery (e.g. sets.themeId → themes.id)
+    fk_hints = discover_cross_name_fks(structured)
+    for fk in fk_hints:
+        # Find source entries for left and right tables
+        left_entry = _find_entry_for_table(structured, fk.left_table)
+        right_entry = _find_entry_for_table(structured, fk.right_table)
+        if left_entry and right_entry:
+            relations.append(CrossSourceRelation(
+                source_a=left_entry.file_path,
+                source_b=right_entry.file_path,
+                relation=(
+                    f"FK candidate: {fk.left_table}.{fk.left_column} → "
+                    f"{fk.right_table}.{fk.right_column} "
+                    f"(overlap: {fk.overlap:.0%}, {fk.relationship})"
+                ),
+                confidence=fk.confidence,
+            ))
+
     # 2. Structured source values mentioned in text documents
     for struct_entry in structured:
         sample_values = _get_sample_values(struct_entry)
@@ -78,6 +97,26 @@ def discover_relations(entries: list[ManifestEntry]) -> list[CrossSourceRelation
                 ))
 
     return relations
+
+
+def _find_entry_for_table(entries: list[ManifestEntry], table_name: str) -> ManifestEntry | None:
+    """Find the ManifestEntry that contains a given table name."""
+    import os
+    table_lower = table_name.lower()
+    for entry in entries:
+        # Check filename stem
+        stem = os.path.splitext(os.path.basename(entry.file_path))[0].lower()
+        if stem == table_lower:
+            return entry
+        # Check SQLite table names
+        for table in entry.summary.get("tables", []):
+            if table.get("name", "").lower() == table_lower:
+                return entry
+        # Check Excel sheet names
+        for sheet in entry.summary.get("sheets", []):
+            if sheet.get("name", "").lower() == table_lower:
+                return entry
+    return None
 
 
 def _read_text_content(entry: ManifestEntry) -> str:

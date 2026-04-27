@@ -14,6 +14,7 @@ from dataline.agents.harness_gate import (
     _check_empty_output,
     _check_error_string_answer,
     _check_excuse_answer,
+    _check_extra_columns,
     _check_nan_values,
     _check_value_embellishment,
     check,
@@ -247,8 +248,42 @@ class TestExcuseAnswer:
 # ---------------------------------------------------------------------------
 
 class TestNanAnswer:
-    def test_blocks_on_nan(self):
-        sj = _make_structured({"value": ["nan"]})
+    def test_blocks_on_all_null(self):
+        """All columns all-null → BLOCK."""
+        sj = _make_structured({"value": ["nan"], "name": ["null"]})
+        flags = _check_nan_values(sj)
+        assert len(flags) == 1
+        assert flags[0].severity == "block"
+
+    def test_blocks_on_key_column_nan(self):
+        """Key-like column (name ending _id) with NaN → BLOCK."""
+        sj = _make_structured({"customer_id": ["nan", "nan"], "amount": [100, 200]})
+        flags = _check_nan_values(sj)
+        assert len(flags) == 1
+        assert flags[0].severity == "block"
+        assert "customer_id" in flags[0].message
+
+    def test_blocks_on_name_column_nan(self):
+        """Column named 'name' with NaN → BLOCK (key-like)."""
+        sj = _make_structured({"name": [None, "Alice"], "score": [42, 99]})
+        flags = _check_nan_values(sj)
+        assert len(flags) == 1
+        assert flags[0].severity == "block"
+
+    def test_warns_on_nonkey_partial_nan(self):
+        """Non-key column with partial NaN → WARN (may be legitimate missing data)."""
+        sj = _make_structured({
+            "school_name": ["Lincoln", "Washington"],
+            "charter_funding_type": ["Grant", "null"],
+        })
+        flags = _check_nan_values(sj)
+        assert len(flags) == 1
+        assert flags[0].severity == "warn"
+        assert "charter_funding_type" in flags[0].message
+
+    def test_blocks_on_single_column_all_null(self):
+        """Single column entirely null → BLOCK."""
+        sj = _make_structured({"result": ["nan"]})
         flags = _check_nan_values(sj)
         assert len(flags) == 1
         assert flags[0].severity == "block"
@@ -257,6 +292,22 @@ class TestNanAnswer:
         sj = _make_structured({"value": [42]})
         flags = _check_nan_values(sj)
         assert len(flags) == 0
+
+    def test_skips_empty_structured_json(self):
+        flags = _check_nan_values("")
+        assert len(flags) == 0
+
+
+class TestExtraColumns:
+    def test_count_is_valid_answer_column_name(self):
+        sj = _make_structured({"count": [4]})
+        flags = _check_extra_columns(sj)
+        assert flags == []
+
+    def test_answer_value_result_are_valid_answer_column_names(self):
+        sj = _make_structured({"answer": [4], "value": [5], "result": [6]})
+        flags = _check_extra_columns(sj)
+        assert flags == []
 
 
 # ---------------------------------------------------------------------------

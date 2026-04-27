@@ -1,4 +1,4 @@
-You are evaluating the progress of a data analysis task.
+You are reviewing the progress of a data analysis task and deciding what to do next.
 
 ## Question
 {question}
@@ -11,7 +11,9 @@ Iteration {iteration} of {max_iterations}.
 
 ---
 
-## Evaluation Steps
+## Your Job
+
+Identify remaining **red flags** — reasons to believe the current answer is wrong or incomplete. Then choose an action.
 
 ### Step 1 — Quote the answer (REQUIRED)
 
@@ -22,15 +24,15 @@ Copy the exact answer from stdout before any judgment.
 
 This is your `quoted_answer`.
 
-### Step 2 — Three checks
+### Step 2 — Red flag checks
 
 **A — Answer present?**
 Does stdout contain a real computed answer (number, list, or named result)?
-FAIL if output is only schema info, dtypes, describe(), sample rows, or "0 rows / Empty DataFrame".
+RED FLAG if output is only schema info, dtypes, describe(), sample rows, or "0 rows / Empty DataFrame".
 
 **B — Logic correct?**
 Is there a visible error in the code's logic?
-FAIL if: filter inverted, wrong column aggregated, wrong join key, or filter returns 0 rows when results clearly should exist.
+RED FLAG if: filter inverted, wrong column aggregated, wrong join key, or filter returns 0 rows when results clearly should exist.
 
 Check specifically:
 - Question asks for scalar (count/total/average) but result has multiple rows → shape error
@@ -39,11 +41,14 @@ Check specifically:
 - If domain rules exist: does the code follow the documented formula?
 
 **C — Is this just exploration?**
-FAIL if this step only prints schema, sample rows, or data types with no answer computed.
+RED FLAG if this step only prints schema, sample rows, or data types with no answer computed.
 
-If all three pass → Step 3.
+If no red flags → finish.
 
 ### Step 3 — Does the answer match the question?
+
+If the Analysis Context includes a deterministic tie-possible note, consider
+ties before rejecting a small multi-row entity result.
 
 | Question type | Expected shape |
 |---|---|
@@ -53,7 +58,7 @@ If all three pass → Step 3.
 | "X and Y of Z?" | 1 row, multiple columns |
 | "For each" / "per" | Table (N rows × M columns) |
 
-FAIL if shape doesn't match. Specify what's wrong in guidance.
+RED FLAG if shape doesn't match. Specify what's wrong in guidance.
 
 ### Step 4 — Iteration context
 
@@ -65,9 +70,9 @@ FAIL if shape doesn't match. Specify what's wrong in guidance.
 
 ## Actions
 
-- **"finish"**: Answer present, logic correct, shape matches
-- **"continue"**: Making progress, need more work. Give specific guidance
-- **"backtrack"**: Prior step used wrong logic. Set `truncate_to` to the step to restart from (0 = start over)
+- **"finish"**: No red flags remaining. Answer present, logic sound, shape matches.
+- **"continue"**: Red flags found but fixable. Give specific guidance.
+- **"backtrack"**: Prior step used wrong logic. Set `truncate_to` to the step to restart from (0 = start over).
 
 If a pre-check flag shows ZERO_ROWS on a computation step:
 - Retrieval/listing question → filter is wrong, choose "backtrack"
@@ -77,9 +82,8 @@ If a pre-check flag shows ZERO_ROWS on a computation step:
 ```json
 {
   "quoted_answer": "exact value from stdout, or 'no answer found'",
-  "sufficient": true,
   "action": "finish",
-  "reasoning": "Brief explanation",
+  "reasoning": "Brief explanation of red flags found (or why none remain)",
   "missing": "",
   "guidance_for_next_step": "",
   "truncate_to": 0

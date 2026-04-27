@@ -45,6 +45,11 @@ def set_question_analysis(state: AnalysisState, analysis: str) -> AnalysisState:
     return replace(state, question_analysis=analysis)
 
 
+def set_task_mode(state: AnalysisState, task_mode: str) -> AnalysisState:
+    """Return new state with task_mode set (called once after routing)."""
+    return replace(state, task_mode=task_mode)
+
+
 def compress_manifest(manifest: Manifest) -> str:
     """Compress manifest to rich schema context.
 
@@ -202,8 +207,29 @@ def add_step(
 
 
 def update_judge_guidance(state: AnalysisState, guidance: str) -> AnalysisState:
-    """Return new state with updated judge guidance."""
-    return replace(state, judge_guidance=guidance)
+    """Return new state with guidance appended.
+
+    Maintains a rolling log of the last 3 guidance records so the model can
+    see what was already tried. Each record is separated by a divider.
+    Empty guidance clears the log (used on backtrack).
+    """
+    if not guidance or not guidance.strip():
+        return replace(state, judge_guidance="")
+
+    # Parse existing records
+    separator = "\n---\n"
+    existing = state.judge_guidance.strip()
+    if existing:
+        records = [r.strip() for r in existing.split(separator) if r.strip()]
+    else:
+        records = []
+
+    records.append(guidance.strip())
+
+    # Cap at last 3 records
+    records = records[-3:]
+
+    return replace(state, judge_guidance=separator.join(records))
 
 
 def update_harness_feedback(state: AnalysisState, feedback: str) -> AnalysisState:

@@ -69,11 +69,11 @@ class StepRecord:
 
 @dataclass(frozen=True)
 class JudgeDecision:
-    """Judge's combined verdict: sufficiency + routing + guidance.
+    """Judge's routing decision: action + guidance.
 
-    Replaces separate VerifierVerdict + RouterDecision with a single LLM call.
+    The Judge identifies remaining red flags and routes to the appropriate
+    action. No explicit sufficiency bool — "finish" action = sufficient.
     """
-    sufficient: bool
     action: str  # continue | backtrack | finish
     reasoning: str = ""
     missing: str = ""
@@ -103,7 +103,14 @@ class QuestionSpec:
         parts: list[str] = []
         if self.answer_type != "unknown":
             parts.append(f"Expected answer shape: {self.answer_type}")
-        if self.expected_column_count > 0:
+        # Column-count inference is deliberately weak for natural-language data
+        # questions. Only expose the count for strict scalar computations where
+        # it is high-confidence; otherwise downstream agents may merge/split
+        # valid answer columns based on a regex guess.
+        if (
+            self.expected_column_count > 0
+            and self.computation_type in {"count", "ratio"}
+        ):
             parts.append(f"Expected column count: {self.expected_column_count}")
         if self.expected_row_count not in ("unknown", "single"):
             parts.append(f"Expected row count: {self.expected_row_count}")
@@ -186,6 +193,7 @@ class AnalysisState:
     variables_in_scope: tuple[tuple[str, str], ...] = ()  # (pickle_name, description)
     judge_guidance: str = ""                        # steering instruction from judge for next iteration
     harness_feedback: str = ""                       # deterministic block/warn messages from HarnessGate
+    task_mode: str = ""                              # deterministic routing hint (single_sql, multi_sql, python_extract, etc.)
     completed_steps: tuple[str, ...] = ()           # 1-line per step
     full_step_details: tuple[StepRecord, ...] = ()  # raw data for Finalizer + Judge
 

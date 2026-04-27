@@ -3,10 +3,14 @@
 Goes beyond column name overlap: checks if shared column names
 have actual value overlap between two data sources.
 Uses sample values already in manifest — no file re-read.
+
+Also provides cross-name FK discovery: detect foreign-key relationships
+between differently-named columns via value overlap (e.g. sets.themeId → themes.id).
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from ..core.types import ManifestEntry
@@ -20,6 +24,20 @@ class JoinHint:
     source_b: str
     value_overlap_pct: float  # 0.0 to 1.0
     confidence: float         # combined confidence score
+
+
+@dataclass(frozen=True)
+class ForeignKeyHint:
+    """Discovered FK relationship between differently-named columns."""
+    left_table: str
+    left_column: str
+    right_table: str
+    right_column: str
+    overlap: float       # 0.0 to 1.0
+    confidence: float
+    left_unique: int
+    right_unique: int
+    relationship: str    # "one_to_one" | "many_to_one" | "many_to_many"
 
 
 def validate_join_keys(
@@ -98,3 +116,151 @@ def _extract_top_values(col_info: dict) -> list:
     """Extract values from top_values if enriched stats are present."""
     top = col_info.get("top_values", [])
     return [entry["value"] for entry in top if "value" in entry]
+
+
+# ---------------------------------------------------------------------------
+# Cross-name FK discovery
+# ---------------------------------------------------------------------------
+
+# Patterns for columns that might be foreign keys pointing to another table
+_FK_LIKE_RE = re.compile(
+    r"(?i)(?:_id$|_key$|_code$|^id$|^key$|^code$|_ref$|_link$|_fk$)",
+)
+
+# Patterns for columns that might be primary keys (targets of FK references)
+_PK_LIKE_RE = re.compile(
+    r"(?i)(?:^id$|^key$|^code$|_id$|_key$|_code$)",
+)
+
+
+def _get_all_columns(entry: ManifestEntry) -> list[tuple[str, str, dict]]:
+    """Extract all (table_name, column_name, column_info) from entry.
+
+    For flat files (CSV/JSON/Parquet): table_name is the filename stem.
+    For SQLite: table_name is the actual table name.
+    """
+    s = entry.summary
+    results: list[tuple[str, str, dict]] = []
+
+    # Derive table name from file path
+    import os
+    default_table = os.path.splitext(os.path.basename(entry.file_path))[0]
+
+    # Flat columns (CSV, JSON, Parquet)
+    if "columns" in s:
+        for col in s["columns"]:
+            name = col.get("name", "")
+            if name:
+                results.append((default_table, name, col))
+
+    # SQLite tables
+    for table in s.get("tables", []):
+        table_name = table.get("name", default_table)
+        for col in table.get("columns", []):
+            name = col.get("name", "")
+            if name:
+                results.append((table_name, name, col))
+
+    # Excel sheets
+    for sheet in s.get("sheets", []):
+        sheet_name = sheet.get("name", default_table)
+        for col in sheet.get("columns", []):
+            name = col.get("name", "")
+            if name:
+                results.append((sheet_name, name, col))
+
+    return results
+
+
+def discover_cross_name_fks(
+    entries: list[ManifestEntry],
+) -> list[ForeignKeyHint]:
+    """Discover FK relationships between differently-named columns.
+
+    Strategy: for each pair of structured sources, compare ID-like columns
+    in table A against PK-like columns in table B using value overlap.
+    Only report pairs with overlap > 0.5 to avoid noise.
+
+    Zero LLM cost — purely deterministic using sample values in manifest.
+    """
+    structured = [
+        e for e in entries
+        if e.file_type in ("csv", "json", "sqlite", "excel", "parquet")
+    ]
+
+    # Collect all columns with their values per source
+    source_columns: list[tuple[ManifestEntry, str, str, list]] = []
+    # (entry, table_name, col_name, values)
+    for entry in structured:
+        for table_name, col_name, col_info in _get_all_columns(entry):
+            values = col_info.get("sample", []) + _extract_top_values(col_info)
+            if values:
+                source_columns.append((entry, table_name, col_name, values))
+
+    # Find FK candidates: column in source A whose values overlap with
+    # a PK-like column in source B (different source)
+    hints: list[ForeignKeyHint] = []
+    seen: set[tuple[str, str, str, str]] = set()  # avoid duplicates
+
+    for i, (entry_a, table_a, col_a, vals_a) in enumerate(source_columns):
+        if not _FK_LIKE_RE.search(col_a):
+            continue
+        set_a = {str(v).lower().strip() for v in vals_a if v is not None}
+        if len(set_a) < 2:  # need at least 2 distinct values to compare
+            continue
+
+        for entry_b, table_b, col_b, vals_b in source_columns:
+            # Skip same source
+            if entry_a.file_path == entry_b.file_path and table_a == table_b:
+                continue
+            # Skip if same column name (handled by existing same-name logic)
+            if col_a.lower() == col_b.lower():
+                continue
+            if not _PK_LIKE_RE.search(col_b):
+                continue
+
+            # Dedup: only keep one direction
+            pair_key = tuple(sorted([
+                (table_a, col_a), (table_b, col_b),
+            ]))
+            if pair_key in seen:
+                continue
+
+            set_b = {str(v).lower().strip() for v in vals_b if v is not None}
+            if len(set_b) < 2:
+                continue
+
+            overlap = set_a & set_b
+            smaller = min(len(set_a), len(set_b))
+            overlap_pct = len(overlap) / smaller if smaller > 0 else 0.0
+
+            if overlap_pct < 0.5:
+                continue
+
+            seen.add(pair_key)
+
+            # Determine relationship type
+            a_unique_ratio = len(set_a) / max(len(vals_a), 1)
+            b_unique_ratio = len(set_b) / max(len(vals_b), 1)
+            if a_unique_ratio > 0.9 and b_unique_ratio > 0.9:
+                relationship = "one_to_one"
+            elif b_unique_ratio > 0.9:
+                relationship = "many_to_one"
+            else:
+                relationship = "many_to_many"
+
+            confidence = 0.4 + 0.6 * overlap_pct  # base 0.4 for cross-name
+
+            hints.append(ForeignKeyHint(
+                left_table=table_a,
+                left_column=col_a,
+                right_table=table_b,
+                right_column=col_b,
+                overlap=round(overlap_pct, 3),
+                confidence=round(min(confidence, 1.0), 2),
+                left_unique=len(set_a),
+                right_unique=len(set_b),
+                relationship=relationship,
+            ))
+
+    return hints

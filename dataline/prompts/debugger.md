@@ -1,5 +1,8 @@
 Fix the following Python code that failed during data analysis execution.
 
+## Goal
+{question_context}
+
 ## Code that failed
 ```python
 {failed_code}
@@ -23,7 +26,8 @@ Fix the following Python code that failed during data analysis execution.
 1. Fix the SPECIFIC error shown in the traceback.
 2. Use the data context above to fix column name mismatches, type errors, encoding issues. Check exact column names and values.
 3. If this is a retry, try a FUNDAMENTALLY DIFFERENT approach — do not just tweak the same failing logic.
-4. Common fixes:
+4. The fixed code must still answer the original question (see Goal above).
+5. Common fixes:
    - KeyError/column not found → check exact column names in data context; try case-insensitive matching
    - TypeError → check column dtypes and data structure (list vs dict vs DataFrame)
    - FileNotFoundError → use `safe_read_csv()` or `safe_read_json()` which auto-resolve paths
@@ -31,7 +35,7 @@ Fix the following Python code that failed during data analysis execution.
    - "unhashable type: list" → don't use list columns as dict keys; iterate instead
    - JSONDecodeError → check if JSON is nested or has unexpected structure; use `describe_data()`
    - UnicodeDecodeError → use encoding="latin-1" or errors="replace"
-5. Return the COMPLETE fixed code (all imports, all logic).
+6. Return the COMPLETE fixed code (all imports, all logic).
 
 ## Retry strategy (if this is attempt 2+)
 - If the SAME error recurs: the approach is wrong. Try a completely different method.

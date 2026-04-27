@@ -30,13 +30,18 @@ Adapter Layer (pluggable readers per format)
     │
 Profiler (deterministic, zero LLM cost)
     │  → rich schema: columns, types, DISTINCT values, sample rows, relationships
+    │  → cross-name FK discovery via value overlap (join_graph)
     │  → domain rules from documentation files
     │
 QuestionSpec (deterministic, zero LLM cost)
     │  → regex/heuristic → answer_type, row_count, computation_type, tie_possible
     │
+TaskRouter (deterministic, zero LLM cost)
+    │  → single_sql / multi_sql / python_extract / document_needed / general
+    │  → hint injected into PlannerCoder context
+    │
 PlannerCoder (1 LLM call)
-    │  → question + rich schema + judge_guidance → executable code (SQL or Python)
+    │  → question + rich schema + task_mode + judge_guidance → executable code
     │  → multi-candidate: 2-3 candidates, first success wins
     │
 Sandbox (dual-engine execution)
@@ -48,6 +53,8 @@ Sandbox (dual-engine execution)
 HarnessGate (deterministic verification, zero LLM cost)
     │  ├─ block → feedback to PlannerCoder, retry (skip Judge)
     │  ├─ warn (first iteration) → soft retry once with guidance
+    │  ├─ repeated WARN ≥3x (whitelisted rules) → escalate to BLOCK
+    │  ├─ SQL static analysis via sqlglot (join keys, WHERE values, column count)
     │  └─ pass/warn → continue to Judge
     │
 Judge (1 LLM call, semantic verification)
@@ -102,9 +109,14 @@ The architecture extends by adding **adapters**, not LLM complexity:
 | SQL-first for structured data | Declarative and precise; LLM generates correct SQL at higher rate than pandas |
 | PlannerCoder merged | Same reasoning process shouldn't be split — avoids info loss between plan→code |
 | Multi-candidate output | LLM outputs 2-3 code candidates; try in order, first success wins (free) |
-| HarnessGate (deterministic) | 15 rules, 7 BLOCK + 8 WARN — never accepts known-bad answers (no fatigue downgrade) |
+| HarnessGate (deterministic) | 16+ rules: BLOCK (nan per-column, empty, dict, embellishment, error, excuse) + WARN (shape, agg_type, columns, SQL static) + escalation |
+| SQL static verifier (sqlglot) | AST analysis: check JOIN keys, WHERE literals vs DISTINCT, column count — 100% parse rate on DuckDB SQL |
+| NaN per-column severity | All-null/key-null → BLOCK, non-key partial → WARN — fixes false-positive BLOCKs on legitimate NULL data |
+| WARN escalation whitelist | Same WARN ≥3x → BLOCK for agg_type/extra_columns/join/qa_column/where_value only |
+| Cross-name FK detection | Value overlap between differently-named ID columns → join_graph in manifest |
+| Deterministic task routing | single_sql/multi_sql/python_extract/document_needed — hint injected, zero LLM |
 | Judge (lightweight LLM) | 1 LLM call for semantic verification after HarnessGate PASS — data shows ~4% catch rate on 3B model, but architecturally correct |
-| QuestionSpec (deterministic) | Regex/heuristic shape inference, zero LLM — enables HarnessGate shape rules |
+| QuestionSpec (deterministic) | Regex/heuristic shape inference + column count estimation, zero LLM — enables HarnessGate shape rules |
 | Code failure → retry | rc!=0 skips to next iteration — never accepts failed code output |
 | No framework (no LangChain) | ~3000 lines of Python, no overhead |
 | Immutable data types | Frozen dataclasses only, no mutation |

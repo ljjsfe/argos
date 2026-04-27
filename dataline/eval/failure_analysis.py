@@ -37,8 +37,8 @@ def categorize_failure(task_score: TaskScore, trace: list[dict]) -> str:
     debugger_entries = [t for t in trace if t.get("agent") == "debugger"]
     error_count = len(debugger_entries)
 
-    # Check verifier — did it say sufficient too early?
-    verifier_entries = [t for t in trace if t.get("agent") == "verifier"]
+    # Check judge — did it finish too early?
+    judge_entries = [t for t in trace if t.get("agent") == "judge"]
 
     # Heuristic categorization
     if error_count >= 3:

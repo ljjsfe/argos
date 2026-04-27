@@ -17,7 +17,7 @@ from ..core.context_manager import ContextManager, Section
 from ..core.llm_client import LLMClient
 
 from ..core.token_estimator import cap_text
-from ..core.types import AnalysisState, HarnessFlag, JudgeDecision, StepRecord
+from ..core.types import AnalysisState, HarnessFlag, JudgeDecision, QuestionSpec, StepRecord
 
 
 def evaluate(
@@ -30,6 +30,7 @@ def evaluate(
     iteration: int = 0,
     max_iterations: int = 8,
     harness_warnings: list[HarnessFlag] | None = None,
+    question_spec: QuestionSpec | None = None,
 ) -> JudgeDecision:
     """Evaluate progress and decide next action in a single LLM call.
 
@@ -53,6 +54,15 @@ def evaluate(
                 "harness_warnings", flags_text,
                 priority=92, compressible=False,
                 heading="## HarnessGate Warnings (deterministic — address in your reasoning)",
+            ))
+
+        if question_spec is not None and question_spec.tie_possible:
+            sections.append(Section(
+                "question_spec",
+                _format_tie_possible_note(question_spec),
+                priority=93,
+                compressible=False,
+                heading="## Tie-Possible Note (deterministic QuestionSpec)",
             ))
 
         context = cm.assemble(sections, llm=llm)
@@ -84,13 +94,11 @@ def evaluate(
         data = json.loads(_extract_json(response))
     except (json.JSONDecodeError, ValueError):
         return JudgeDecision(
-            sufficient=False,
             action="continue",
             reasoning="Parse error, defaulting to continue",
         )
 
     return JudgeDecision(
-        sufficient=data.get("sufficient", False),
         action=data.get("action", "continue"),
         reasoning=data.get("reasoning", ""),
         missing=data.get("missing", ""),
@@ -176,6 +184,18 @@ def _build_sections(state: AnalysisState) -> list[Section]:
         ))
 
     return sections
+
+
+def _format_tie_possible_note(spec: QuestionSpec) -> str:
+    """Format a narrow Judge hint for tie-prone min/max style questions."""
+    return (
+        "- tie_possible: true\n"
+        "- If the latest result has a small number of rows for a highest/lowest/"
+        "most/least style entity lookup, verify whether they are tied before "
+        "rejecting the result for row count alone.\n"
+        "- This note is not a general shape contract; still judge count, ratio, "
+        "average, and percentage answers strictly."
+    )
 
 
 def _format_steps(steps: list[StepRecord]) -> str:

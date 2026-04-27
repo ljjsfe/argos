@@ -45,6 +45,13 @@ class TestRatioQuestions:
         spec = analyze_deterministic("How much faster in percentage is the champion?")
         assert spec.computation_type == "ratio"
 
+    def test_how_many_times_is_ratio_not_count(self):
+        spec = analyze_deterministic(
+            "How many times was the budget in Advertisement for A more than B?"
+        )
+        assert spec.computation_type == "ratio"
+        assert spec.expected_row_count == "single"
+
 
 class TestAggregateQuestions:
     def test_average(self):
@@ -141,6 +148,20 @@ class TestColumnCountEstimation:
         )
         # Should detect "and" conjunction → multi-column
         assert spec.expected_column_count >= 2
+
+    def test_filter_and_does_not_increase_columns(self):
+        spec = analyze_deterministic(
+            "What are the bonds that have phosphorus and nitrogen as their atom elements?"
+        )
+        assert spec.answer_type == "list"
+        assert spec.expected_column_count == 0
+
+    def test_output_and_still_increases_columns(self):
+        spec = analyze_deterministic(
+            "List the names and funding types of schools from Riverside districts"
+        )
+        assert spec.answer_type == "list"
+        assert spec.expected_column_count == 2
 
 
 class TestFailOpen:

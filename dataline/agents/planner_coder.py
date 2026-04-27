@@ -28,6 +28,29 @@ logger = logging.getLogger(__name__)
 
 _PROMPT_TEMPLATE = (Path(__file__).parent.parent / "prompts" / "planner_coder.md").read_text()
 
+# Task mode hints — injected by deterministic router in orchestrator
+_TASK_MODE_HINTS = {
+    "single_sql": (
+        "Task mode: single_sql\n"
+        "All data is structured. Use a single SQL query."
+    ),
+    "multi_sql": (
+        "Task mode: multi_sql\n"
+        "Multiple structured tables with join candidates. "
+        "Use SQL, validate join keys match the schema, avoid row explosion."
+    ),
+    "python_extract": (
+        "Task mode: python_extract\n"
+        "Data includes unstructured files (documents/PDFs). "
+        "Use Python to extract relevant data first, then analyze."
+    ),
+    "document_needed": (
+        "Task mode: document_needed\n"
+        "Domain knowledge documents are available. "
+        "Reference domain rules when interpreting column values or thresholds."
+    ),
+}
+
 
 @dataclass(frozen=True)
 class PlannerCoderOutput:
@@ -121,6 +144,18 @@ def _build_context_managed_prompt(
             compressible=False,
             heading="",
         ))
+
+    # Task mode hint — deterministic routing
+    if state.task_mode:
+        hint = _TASK_MODE_HINTS.get(state.task_mode, "")
+        if hint:
+            sections.append(Section(
+                name="task_mode",
+                content=f"## Task Mode\n{hint}",
+                priority=92,
+                compressible=False,
+                heading="",
+            ))
 
     # Data manifest (rich schema with DISTINCT values, sample rows)
     sections.append(Section(

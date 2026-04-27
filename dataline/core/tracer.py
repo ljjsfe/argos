@@ -348,7 +348,6 @@ class TaskTracer:
                 "harness_flags": it.get("harness_flags", []),
                 "judge": {
                     "action": it.get("judge_action", ""),
-                    "sufficient": it.get("judge_sufficient", False),
                     "reasoning": it.get("judge_reasoning", ""),
                     "guidance": it.get("judge_guidance", ""),
                 },

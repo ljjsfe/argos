@@ -4,11 +4,16 @@ Supports two execution modes:
 - Python (.py): full Python scripts via subprocess
 - SQL (.sql): raw SQL executed via DuckDB (unified engine for CSV, JSON,
   Parquet, and SQLite .db files) with automatic registration and save_result()
+
+Path resolution: a symlink scratch directory is created per execution so that
+generated code can reference data files by their basename (relative path).
+LLM-generated code sees flat filenames in cwd; no need for os.environ["TASK_DIR"].
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import pickle
 import shutil
@@ -18,6 +23,8 @@ import time
 from pathlib import Path
 
 from .types import SandboxResult
+
+logger = logging.getLogger(__name__)
 
 
 _SQL_RUNNER_TEMPLATE = '''"""Auto-generated SQL runner — DuckDB unified engine."""
@@ -48,6 +55,53 @@ for csv_path in csv_files:
         registered_views.add(view_name.lower())
     except Exception as e:
         print(f"Warning: could not register {csv_path}: {e}")
+
+# Register JSON files as views (KDD format: {"table": "name", "records": [...]})
+json_files = glob.glob(os.path.join(task_dir, "**/*.json"), recursive=True)
+for json_path in json_files:
+    view_name = os.path.splitext(os.path.basename(json_path))[0]
+    view_name = view_name.replace("-", "_").replace(" ", "_")
+    if view_name.lower() in registered_views:
+        continue  # CSV view takes precedence
+    try:
+        with open(json_path, "r") as f:
+            jdata = json.load(f)
+        # KDD format: {"table": "...", "records": [...]}
+        if isinstance(jdata, dict) and "records" in jdata:
+            records = jdata["records"]
+        elif isinstance(jdata, list):
+            records = jdata
+        else:
+            continue
+        if not records:
+            continue
+        import pandas as _pd
+        df_json = _pd.DataFrame(records)
+        # JSON often stores numeric IDs as strings. Coerce safe numeric-looking
+        # columns so cross-format joins with SQLite integer keys work. Preserve
+        # code-like values with leading zeroes (e.g. "00123").
+        for _col in list(df_json.columns):
+            try:
+                _series = df_json[_col]
+                if _series.dtype != object:
+                    continue
+                _nonnull = _series.dropna().astype(str).str.strip()
+                if _nonnull.empty:
+                    continue
+                _has_leading_zero = _nonnull.str.match(r"^0\\d+").any()
+                _numeric_like = _nonnull.str.match(r"^-?\\d+(?:\\.\\d+)?$").mean()
+                _id_like = any(
+                    token in _col.lower()
+                    for token in ("id", "key", "count", "score", "amount", "number")
+                )
+                if _id_like and not _has_leading_zero and _numeric_like >= 0.9:
+                    df_json[_col] = _pd.to_numeric(df_json[_col], errors="coerce")
+            except Exception:
+                pass
+        conn.register(view_name, df_json)
+        registered_views.add(view_name.lower())
+    except Exception as e:
+        print(f"Warning: could not register JSON {json_path}: {e}")
 
 # Attach SQLite databases and expose tables as top-level views
 db_files = glob.glob(os.path.join(task_dir, "**/*.db"), recursive=True) + \\
@@ -110,13 +164,19 @@ class Sandbox:
     def temp_dir(self) -> str:
         return self._temp_dir
 
-    def execute(self, code: str, step_id: str | None = None, language: str = "python") -> SandboxResult:
-        """Execute code. Language auto-detected if not specified.
+    def execute(
+        self, code: str, step_id: str | None = None,
+        language: str = "python", use_scratch: bool = True,
+    ) -> SandboxResult:
+        """Execute code in sandbox.
 
         Args:
             code: Python script or raw SQL query.
             step_id: Step identifier for file naming.
             language: "python" | "sql" — if "sql", wraps in DuckDB/SQLite runner.
+            use_scratch: If True, run in scratch dir with symlinks to task files
+                so code can use relative paths. Set False for Analyzer steps that
+                should not be affected by cwd changes.
 
         Returns:
             SandboxResult with stdout, stderr, return_code, structured_json.
@@ -135,7 +195,13 @@ class Sandbox:
         if language == "sql":
             code = self._wrap_sql(code)
 
-        # Write code to temp file
+        # Determine cwd: scratch dir (symlinks) or temp dir (legacy)
+        if use_scratch:
+            run_dir = self._build_scratch()
+        else:
+            run_dir = self._temp_dir
+
+        # Write code to temp file (in TEMP_DIR, not scratch — keeps scratch clean)
         code_path = Path(self._temp_dir) / f"{step_id}.py"
         code_path.write_text(code, encoding="utf-8")
 
@@ -143,6 +209,8 @@ class Sandbox:
         env["TASK_DIR"] = self._task_dir
         env["TEMP_DIR"] = self._temp_dir
         env["PYTHONIOENCODING"] = "utf-8"
+        # Add TEMP_DIR to PYTHONPATH so `import data_helpers` works from any cwd
+        env["PYTHONPATH"] = self._temp_dir + os.pathsep + env.get("PYTHONPATH", "")
 
         start = time.time()
         try:
@@ -152,7 +220,7 @@ class Sandbox:
                 text=True,
                 timeout=self._timeout,
                 env=env,
-                cwd=self._temp_dir,
+                cwd=run_dir,
             )
             elapsed_ms = int((time.time() - start) * 1000)
 
@@ -182,6 +250,10 @@ class Sandbox:
                 execution_time_ms=elapsed_ms,
                 step_id=step_id,
             )
+        finally:
+            # Clean up scratch dir (symlinks only, no real data deleted)
+            if use_scratch and os.path.exists(run_dir) and run_dir != self._temp_dir:
+                shutil.rmtree(run_dir, ignore_errors=True)
 
     def _wrap_sql(self, sql: str) -> str:
         """Wrap raw SQL in a DuckDB runner script.
@@ -191,6 +263,44 @@ class Sandbox:
         escaped_sql = sql.replace("\\", "\\\\").replace('"""', '\\"\\"\\"')
 
         return _SQL_RUNNER_TEMPLATE.replace("__SQL_PLACEHOLDER__", escaped_sql)
+
+    def _build_scratch(self) -> str:
+        """Create a scratch directory with symlinks to all task files.
+
+        The scratch dir is a flat directory where each top-level entry in the
+        task directory is symlinked. This lets LLM-generated code use relative
+        paths (e.g., `pd.read_csv("Match.csv")`) naturally.
+
+        Also symlinks data_helpers.py so `import data_helpers` works from cwd.
+
+        Returns:
+            Path to the scratch directory.
+        """
+        scratch = tempfile.mkdtemp(prefix="scratch_", dir=self._temp_dir)
+        task_path = Path(self._task_dir)
+
+        for item in task_path.iterdir():
+            link = Path(scratch) / item.name
+            if not link.exists():
+                try:
+                    os.symlink(str(item), str(link))
+                except OSError:
+                    logger.debug("Could not symlink %s", item)
+
+        # Also symlink data_helpers so import works from scratch cwd
+        helpers = Path(self._temp_dir) / "data_helpers.py"
+        if helpers.exists():
+            link = Path(scratch) / "data_helpers.py"
+            if not link.exists():
+                try:
+                    os.symlink(str(helpers), str(link))
+                except OSError:
+                    pass
+
+        # Symlink step_result.json location so save_result() writes to TEMP_DIR
+        # (data_helpers reads TEMP_DIR env var, so this is not needed here)
+
+        return scratch
 
     def _install_helpers(self) -> None:
         """Copy data_helpers.py to TEMP_DIR so generated code can import it."""

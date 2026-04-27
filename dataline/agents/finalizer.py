@@ -56,6 +56,7 @@ def _format_kdd(
     # --- Path 1: structured output from save_result() ---
     structured = _try_structured_extract(state)
     if structured is not None:
+        structured = _normalize_answer_values(structured, question_spec)
         return _trim_extra_columns(structured, question_spec, question)
 
     # --- Path 2: LLM formatting ---
@@ -83,10 +84,16 @@ def _format_kdd(
     try:
         data = json.loads(_extract_json(response))
         if "columns" in data:
-            return data["columns"]
-        return data
+            answer = data["columns"]
+        else:
+            answer = data
+        if isinstance(answer, dict):
+            answer = _normalize_answer_values(answer, question_spec)
+            answer = _trim_extra_columns(answer, question_spec, question)
+        return answer
     except (json.JSONDecodeError, ValueError):
-        return _fallback_extract(steps_done, state)
+        answer = _fallback_extract(steps_done, state)
+        return _normalize_answer_values(answer, question_spec)
 
 
 def _format_dabstep(
@@ -238,6 +245,37 @@ def _has_stdout_leak(answer: dict) -> bool:
     return False
 
 
+_MIDNIGHT_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})[ T]00:00:00(?:\.0+)?$")
+
+
+def _normalize_answer_values(
+    answer: dict,
+    spec: QuestionSpec | None = None,
+) -> dict:
+    """Normalize answer cell values before column trimming.
+
+    This is output-format alignment, not semantic rewriting. It intentionally
+    starts narrow: DuckDB/pandas often render date-only values as midnight
+    datetimes, while the scorer expects date strings.
+    """
+    normalized: dict = {}
+    for col, values in answer.items():
+        vals = values if isinstance(values, list) else [values]
+        non_null = [v for v in vals if v is not None and str(v).strip() != ""]
+        strip_midnight = bool(non_null) and all(
+            isinstance(v, str) and _MIDNIGHT_RE.match(v.strip())
+            for v in non_null
+        )
+        if strip_midnight:
+            normalized[col] = [
+                _MIDNIGHT_RE.sub(r"\1", v.strip()) if isinstance(v, str) else v
+                for v in vals
+            ]
+        else:
+            normalized[col] = values
+    return normalized
+
+
 
 _ID_SUFFIX_RE = re.compile(r"(?i)^.+[_]?id$|^index$|^rowid$|^row_id$|^row_number$")
 
@@ -277,15 +315,18 @@ def _trim_extra_columns(
             continue  # Question mentions this entity — keep it
         droppable.append(col_name)
 
-    if len(droppable) < to_drop:
+    if not droppable:
         return answer
 
-    # Drop the first `to_drop` ID columns (order preserves original dict order)
-    drop_set = set(droppable[:to_drop])
+    # Drop as many ID columns as needed (up to to_drop), even if we can't
+    # reach the exact expected count. Partial improvement is still valuable
+    # since extra columns reduce score.
+    drop_count = min(len(droppable), to_drop)
+    drop_set = set(droppable[:drop_count])
     trimmed = {k: v for k, v in answer.items() if k not in drop_set}
     logger.info(
-        "Column trim: dropped %s (spec expected %d cols, had %d)",
-        drop_set, expected, actual,
+        "Column trim: dropped %s (spec expected %d cols, had %d, now %d)",
+        drop_set, expected, actual, len(trimmed),
     )
     return trimmed
 

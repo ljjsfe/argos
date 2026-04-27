@@ -52,11 +52,13 @@ _COUNT_PATTERNS = [
 
 # Ratio/percentage patterns
 _RATIO_PATTERNS = [
+    r"\bhow\s+many\s+times\b",
     r"\bwhat\s+(?:is\s+the\s+)?percentage\b",
     r"\bcalculate\s+the\s+percentage\b",
     r"\bwhat\s+(?:is\s+the\s+)?(?:ratio|fraction|proportion)\b",
     r"\bhow\s+much\s+(?:faster|slower|more|less)\s+in\s+percentage\b",
     r"\bpercentage\s+of\b",
+    r"\b(?:ratio|rate|percentage|percent|how\s+many\s+times)\b.*\bcompared\s+to\b",
 ]
 
 # Aggregation patterns — sum/avg/min/max
@@ -166,6 +168,16 @@ def analyze_deterministic(question: str) -> QuestionSpec:
             tie_possible=True,
         )
 
+    # ── Ratio / percentage (before count: "how many times" is ratio) ──
+    if _matches_any(q, _RATIO_PATTERNS):
+        return QuestionSpec(
+            answer_type="scalar",
+            expected_column_count=1,
+            expected_row_count="single",
+            value_style="numeric",
+            computation_type="ratio",
+        )
+
     # ── Count patterns ──
     if _matches_any(q, _COUNT_PATTERNS):
         # Guard: "his number" / "the number" (attribute) vs "number of X" (count)
@@ -180,16 +192,6 @@ def analyze_deterministic(question: str) -> QuestionSpec:
                 value_style="numeric",
                 computation_type="count",
             )
-
-    # ── Ratio / percentage ──
-    if _matches_any(q, _RATIO_PATTERNS):
-        return QuestionSpec(
-            answer_type="scalar",
-            expected_column_count=1,
-            expected_row_count="single",
-            value_style="numeric",
-            computation_type="ratio",
-        )
 
     # ── Aggregation (avg/sum/total) — only if no "list" keyword present ──
     if _matches_any(q, _AGG_PATTERNS) and not _matches_any(q, _LIST_PATTERNS):
@@ -229,18 +231,54 @@ def _estimate_column_count(question: str) -> int:
     """Estimate expected column count from question structure.
 
     Returns 0 (unknown) if uncertain, never over-counts.
+    Conservative: only returns non-zero when high confidence.
     """
-    # Explicit "X and Y" pattern for multiple requested fields
-    # e.g., "list their ID, sex and disease"
-    #        "the names and funding types"
-    conjunctions = re.findall(
-        r"\b(?:and\s+(?:the(?:ir)?\s+)?)",
-        question,
+    q = question.strip()
+
+    # "and" only implies multiple output columns when it appears in an
+    # output-intent phrase. In relative/filter clauses ("bonds that have
+    # phosphorus and nitrogen"), "and" describes conditions, not answer fields.
+    filter_and = re.search(
+        r"\b(?:that|which|who|where|having)\b[^?]*\band\b",
+        q,
         re.IGNORECASE,
     )
-    if conjunctions:
-        # Rough: 1 base field + 1 per conjunction, but cap at 3
+    output_and = re.search(
+        r"\b(?:list|show|provide|state|give|return|include|write)\b"
+        r"[^?]*\band\b",
+        q,
+        re.IGNORECASE,
+    ) or re.search(
+        r"\b(?:names?|ids?|types?|funding\s+types?|values?|dates?|costs?|amounts?)\b"
+        r"\s+and\s+(?:the\s+)?"
+        r"(?:names?|ids?|types?|funding\s+types?|values?|dates?|costs?|amounts?)\b",
+        q,
+        re.IGNORECASE,
+    ) or re.search(
+        # "what is the X and the Y" — asking for multiple output values
+        r"\bwhat\s+is\b[^?]*\band\s+(?:the\s+)?(?:average|total|number|"
+        r"percentage|count|sum|ratio|mean|cost|amount|value|score|age|name)\b",
+        q,
+        re.IGNORECASE,
+    )
+    if output_and and not filter_and:
+        conjunctions = re.findall(r"\band\b", q, re.IGNORECASE)
         return min(1 + len(conjunctions), 3)
+    if filter_and:
+        return 0
+
+    # "what is the X" / "what is X's Y" → single attribute → 1 column
+    # But NOT "what are the X" (plural → could be list with multiple cols)
+    # Guard: skip if output_and matched (multi-output "what is X and Y")
+    if not output_and and re.search(
+        r"\bwhat\s+is\s+(?:the\s+)?(?:comment|name|title|value|score|"
+        r"answer|result|amount|total|average|percentage|number|count|"
+        r"ratio|rate|date|year|month|day|time|age|price|cost|"
+        r"salary|revenue|profit|weight|height|length|distance|"
+        r"duration|speed|temperature|population|area|volume)\b",
+        question, re.IGNORECASE,
+    ):
+        return 1
 
     return 0
 

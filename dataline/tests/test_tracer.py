@@ -127,7 +127,6 @@ class TestTaskTracer:
                     "debug_retries": 0,
                     "stdout_preview": "DataFrame: 100 rows",
                     "judge_action": "finish",
-                    "judge_sufficient": True,
                     "judge_reasoning": "Data loaded",
                     "judge_missing": "",
                     "judge_guidance": "",

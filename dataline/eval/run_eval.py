@@ -197,7 +197,7 @@ def _generate_suggestions(
         elif category == "partial_result":
             suggestions.append(
                 f"[MED] Address incomplete answers ({count} tasks, {pct:.0f}%). "
-                f"Verifier may be saying 'sufficient' too early."
+                f"Judge may be choosing 'finish' too early."
             )
         elif category == "timeout":
             suggestions.append(

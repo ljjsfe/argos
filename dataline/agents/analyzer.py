@@ -330,7 +330,7 @@ def _attempt_llm_profile(manifest_json: str, llm: LLMClient, sandbox: Sandbox) -
     if not code:
         code = response
 
-    result = sandbox.execute(code, step_id="analyzer")
+    result = sandbox.execute(code, step_id="analyzer", use_scratch=False)
 
     if result.return_code == 0 and len(result.stdout.strip()) > 50:
         return result.stdout
@@ -361,7 +361,7 @@ def _attempt_simple_profile(manifest_json: str, llm: LLMClient, sandbox: Sandbox
     if not code:
         code = response
 
-    result = sandbox.execute(code, step_id="analyzer_retry")
+    result = sandbox.execute(code, step_id="analyzer_retry", use_scratch=False)
 
     if result.return_code == 0 and len(result.stdout.strip()) > 50:
         return result.stdout

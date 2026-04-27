@@ -307,7 +307,7 @@ def _check_row_count_bound(
 
 _DEBUG_COLUMN_PATTERNS = [
     r"^unnamed", r"^index$", r"^row_count$", r"^row_num",
-    r"^level_\d+$", r"^__", r"^count$",
+    r"^level_\d+$", r"^__",
 ]
 
 
@@ -458,45 +458,114 @@ def _check_dict_string_answer(structured_json: str) -> list[HarnessFlag]:
 
 _NAN_STRINGS = {"nan", "none", "null", "nat", "<na>", ""}
 
+# Columns whose name matches these patterns are "key-like" — NaN in them
+# almost certainly means a failed join/lookup, not legitimate missing data.
+_KEY_COLUMN_RE = re.compile(
+    r"(?i)(?:^id$|_id$|^key$|_key$|^code$|_code$|^name$|_name$|^title$|_title$"
+    r"|^index$|^rowid$|^identifier$)",
+)
+
+
+def _col_has_nan(vals: list) -> tuple[bool, int, int]:
+    """Check if a column's values contain NaN. Returns (has_nan, nan_count, total)."""
+    total = len(vals)
+    nan_count = sum(1 for v in vals if str(v).strip().lower() in _NAN_STRINGS)
+    return nan_count > 0, nan_count, total
+
 
 def _check_nan_values(structured_json: str) -> list[HarnessFlag]:
-    """Rule 8c: block answers that contain NaN/null values.
+    """Rule 8c: NaN/null detection with per-column severity.
 
-    A NaN in a structured answer almost always means the computation failed
-    silently (e.g. missing join key, wrong column name, division by zero).
+    Severity logic (precision-first):
+    - All columns all-null → BLOCK (computation completely failed)
+    - Key-like column has any null → BLOCK (join/lookup failed)
+    - Non-key column with partial nulls → WARN (may be legitimate missing data)
+
+    This avoids false-positive BLOCKs on list queries where gold answers
+    legitimately contain NULL in non-key columns (e.g. task_199).
     """
     if not structured_json:
         return []
     try:
         data = json.loads(structured_json)
         answer = data.get("answer", {})
-        if not isinstance(answer, dict):
+        if not isinstance(answer, dict) or not answer:
             return []
     except (json.JSONDecodeError, ValueError):
         return []
 
-    nan_cols: list[str] = []
+    # Classify columns
+    key_nan_cols: list[str] = []
+    nonkey_nan_cols: list[str] = []
+    all_cols_all_null = True  # assume true, falsify below
+
     for col, vals in answer.items():
         if not isinstance(vals, list):
             vals = [vals]
-        for v in vals:
-            if str(v).strip().lower() in _NAN_STRINGS:
-                nan_cols.append(col)
-                break
+        has_nan, nan_count, total = _col_has_nan(vals)
 
-    if not nan_cols:
+        if not has_nan or total == 0:
+            all_cols_all_null = False
+            continue
+
+        # Column has at least one NaN
+        col_all_null = (nan_count == total)
+
+        if not col_all_null:
+            all_cols_all_null = False
+
+        is_key = bool(_KEY_COLUMN_RE.search(col))
+
+        if is_key:
+            key_nan_cols.append(col)
+        elif col_all_null:
+            nonkey_nan_cols.append(col)
+        else:
+            nonkey_nan_cols.append(col)
+
+    if not key_nan_cols and not nonkey_nan_cols:
         return []
 
-    return [HarnessFlag(
-        rule="nan_answer",
-        severity="block",
-        message=(
-            f"Answer contains NaN/null values in column(s): {nan_cols}. "
-            f"This usually means a join returned no matches, a column name "
-            f"was wrong, or a computation produced NaN. Check your data "
-            f"loading and computation logic."
-        ),
-    )]
+    flags: list[HarnessFlag] = []
+
+    # Case 1: all answer columns entirely null → BLOCK
+    if all_cols_all_null:
+        all_null_cols = key_nan_cols + nonkey_nan_cols
+        return [HarnessFlag(
+            rule="nan_answer",
+            severity="block",
+            message=(
+                f"All answer values are NaN/null (columns: {all_null_cols}). "
+                f"The computation completely failed — check join keys, "
+                f"column names, and data loading logic."
+            ),
+        )]
+
+    # Case 2: key-like column has NaN → BLOCK
+    if key_nan_cols:
+        flags.append(HarnessFlag(
+            rule="nan_answer",
+            severity="block",
+            message=(
+                f"Key column(s) contain NaN/null: {key_nan_cols}. "
+                f"This usually means a join returned no matches or a "
+                f"column name was wrong. Check join keys and column names."
+            ),
+        ))
+
+    # Case 3: non-key column partial null → WARN (may be legitimate)
+    if nonkey_nan_cols and not key_nan_cols:
+        flags.append(HarnessFlag(
+            rule="nan_answer",
+            severity="warn",
+            message=(
+                f"Non-key column(s) contain some NaN/null values: "
+                f"{nonkey_nan_cols}. This may be legitimate missing data "
+                f"or a computation issue. Verify the source data."
+            ),
+        ))
+
+    return flags
 
 
 # ---------------------------------------------------------------------------
@@ -846,6 +915,185 @@ def _check_tie_possible(
 
 
 # ---------------------------------------------------------------------------
+# Rule 15: SQL Static Verifier (sqlglot AST analysis)
+# ---------------------------------------------------------------------------
+
+def _check_sql_static(
+    code: str,
+    data_profile: str,
+    spec: QuestionSpec,
+) -> list[HarnessFlag]:
+    """Rule 15: SQL AST analysis for join keys, filter values, column count.
+
+    Uses sqlglot to parse SQL and check:
+    - JOIN keys against known columns/relations in data_profile
+    - WHERE literal values against low-cardinality DISTINCT values
+    - SELECT column count vs QuestionSpec expected
+
+    Fail-open: parse failure → skip. Python code → skip.
+    All checks produce WARN only (never BLOCK).
+    """
+    # Only analyze raw SQL or SQL embedded in duckdb.execute()
+    sql = _extract_sql_from_code(code)
+    if not sql:
+        return []
+
+    try:
+        import sqlglot
+        from sqlglot import exp
+    except ImportError:
+        return []  # sqlglot not available → skip
+
+    try:
+        parsed = sqlglot.parse(sql, read="duckdb")
+        if not parsed:
+            return []
+    except Exception:
+        return []  # parse failure → fail-open
+
+    flags: list[HarnessFlag] = []
+    stmt = parsed[0]  # analyze first statement
+
+    # --- Check SELECT column count vs QuestionSpec ---
+    if spec.expected_column_count > 0:
+        try:
+            select_cols = [
+                col for col in stmt.find_all(exp.Column)
+                if _is_select_column(col, stmt)
+            ]
+            # Count star selects
+            star_count = len(list(stmt.find_all(exp.Star)))
+            if not star_count and select_cols:
+                # Deduplicate by alias/name
+                unique_cols = set()
+                for col in select_cols:
+                    unique_cols.add(str(col))
+                actual = len(unique_cols)
+                if actual > spec.expected_column_count * 2:
+                    flags.append(HarnessFlag(
+                        rule="sql_column_count",
+                        severity="warn",
+                        message=(
+                            f"SQL SELECT has ~{actual} columns but question "
+                            f"expects ~{spec.expected_column_count}. "
+                            f"Remove extra columns to avoid score penalty."
+                        ),
+                    ))
+        except Exception:
+            pass  # fail-open
+
+    # --- Check WHERE literals against DISTINCT values ---
+    try:
+        _check_where_literals(stmt, data_profile, flags)
+    except Exception:
+        pass  # fail-open
+
+    return flags
+
+
+def _extract_sql_from_code(code: str) -> str:
+    """Extract SQL from raw SQL or Python-embedded duckdb.execute().
+
+    Returns empty string if no SQL found.
+    """
+    stripped = code.strip()
+    first_word = stripped.split()[0].upper() if stripped.split() else ""
+
+    # Raw SQL
+    sql_starters = ("SELECT", "WITH", "CREATE", "ATTACH", "PRAGMA")
+    has_python = any(kw in code for kw in ("import ", "def ", "print(", "from ", "class "))
+    if first_word in sql_starters and not has_python:
+        return stripped
+
+    # Embedded SQL in Python
+    patterns = [
+        r'\.(?:execute|sql)\s*\(\s*"""(.*?)"""',
+        r"\.(?:execute|sql)\s*\(\s*'''(.*?)'''",
+        r'\.(?:execute|sql)\s*\(\s*"((?:[^"\\]|\\.)*)"',
+        r"\.(?:execute|sql)\s*\(\s*'((?:[^'\\]|\\.)*)'",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, code, re.DOTALL)
+        if match:
+            sql = match.group(1).strip()
+            if sql and len(sql) > 20:
+                return sql
+
+    return ""
+
+
+def _is_select_column(col, stmt) -> bool:
+    """Check if a Column expression is in the SELECT clause (not WHERE/JOIN)."""
+    try:
+        from sqlglot import exp
+        parent = col.parent
+        # Walk up to find if we're in a Select expression
+        while parent is not None:
+            if isinstance(parent, exp.Select):
+                return True
+            if isinstance(parent, (exp.Where, exp.Join, exp.On, exp.Group, exp.Order)):
+                return False
+            parent = parent.parent
+    except Exception:
+        pass
+    return False
+
+
+def _check_where_literals(stmt, data_profile: str, flags: list[HarnessFlag]) -> None:
+    """Check WHERE clause literal values against known DISTINCT values.
+
+    Only checks low-cardinality fields (DISTINCT values listed in profile).
+    Fail-open on any ambiguity.
+    """
+    from sqlglot import exp
+
+    # Parse DISTINCT values from data_profile
+    # Format in profile: "col_name (dtype, N distinct): val1, val2, val3"
+    distinct_map: dict[str, set[str]] = {}
+    for line in data_profile.split("\n"):
+        match = re.match(r"\s*(\w+)\s+\([^)]*\d+\s*distinct\):\s*(.+)", line, re.IGNORECASE)
+        if match:
+            col_name = match.group(1).lower()
+            values = {v.strip().lower().strip("'\"") for v in match.group(2).split(",")}
+            if len(values) <= 50:  # only low-cardinality
+                distinct_map[col_name] = values
+
+    if not distinct_map:
+        return
+
+    # Find EQ conditions in WHERE
+    for eq in stmt.find_all(exp.EQ):
+        try:
+            left = eq.left
+            right = eq.right
+            col_name = None
+            literal_val = None
+
+            if isinstance(left, exp.Column) and isinstance(right, exp.Literal):
+                col_name = left.name.lower()
+                literal_val = right.this.lower()
+            elif isinstance(right, exp.Column) and isinstance(left, exp.Literal):
+                col_name = right.name.lower()
+                literal_val = left.this.lower()
+
+            if col_name and literal_val and col_name in distinct_map:
+                known_values = distinct_map[col_name]
+                if literal_val not in known_values:
+                    flags.append(HarnessFlag(
+                        rule="sql_where_value",
+                        severity="warn",
+                        message=(
+                            f"WHERE {col_name} = '{literal_val}' but this value "
+                            f"is not in the known DISTINCT values for {col_name}. "
+                            f"Known values: {sorted(list(known_values))[:10]}. "
+                            f"Check spelling and case sensitivity."
+                        ),
+                    ))
+        except Exception:
+            continue  # fail-open per condition
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -891,5 +1139,8 @@ def check(
 
     # Tie-possible check
     flags.extend(_check_tie_possible(spec, question, code, structured_json))
+
+    # SQL static analysis (fail-open)
+    flags.extend(_check_sql_static(code, data_profile, spec))
 
     return flags
