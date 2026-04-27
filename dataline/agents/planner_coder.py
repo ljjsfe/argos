@@ -58,7 +58,7 @@ def generate(
     """
     if state and cm:
         prompt = _build_context_managed_prompt(
-            state, cm, llm, qa_guidance=qa_guidance,
+            state, cm, llm,
             iteration=iteration, max_iterations=max_iterations,
         )
     else:
@@ -77,11 +77,14 @@ def _build_context_managed_prompt(
     cm: ContextManager,
     llm: Any,
     *,
-    qa_guidance: str = "",
     iteration: int = 0,
     max_iterations: int = 8,
 ) -> str:
-    """Build budget-managed context with all information in one prompt."""
+    """Build budget-managed context — clean and focused.
+
+    Only includes: question, schema, domain rules, harness feedback, prior steps.
+    No redundant data_profile, QA guidance, or question_analysis sections.
+    """
     sections = []
 
     # Question — highest priority, never compress
@@ -93,36 +96,12 @@ def _build_context_managed_prompt(
         heading="",
     ))
 
-    # Iteration budget — let LLM know where it is in the loop
-    budget_note = f"Iteration {iteration + 1} of {max_iterations}."
-    if iteration >= max_iterations - 1:
-        budget_note += " LAST ITERATION — output your best answer now."
-    elif iteration >= max_iterations - 2:
-        budget_note += " Second-to-last — prioritize a working solution."
-    sections.append(Section(
-        name="budget",
-        content=f"## Budget\n{budget_note}",
-        priority=98,
-        compressible=False,
-        heading="",
-    ))
-
-    # Judge guidance — must address (second highest priority)
-    if state.judge_guidance:
-        sections.append(Section(
-            name="judge_guidance",
-            content=f"## Judge Guidance (MUST ADDRESS)\n{state.judge_guidance}",
-            priority=95,
-            compressible=False,
-            heading="",
-        ))
-
-    # Harness feedback — deterministic block/warn signals (highest actionable priority)
+    # Harness feedback — deterministic block/warn signals
     if state.harness_feedback:
         sections.append(Section(
             name="harness_feedback",
             content=(
-                f"## HarnessGate Feedback (DETERMINISTIC — FIX THESE)\n"
+                f"## HarnessGate Feedback (FIX THESE)\n"
                 f"{state.harness_feedback}"
             ),
             priority=96,
@@ -130,17 +109,20 @@ def _build_context_managed_prompt(
             heading="",
         ))
 
-    # QA guidance — structural hints from QuestionAnalyzer
-    if qa_guidance:
+    # Judge guidance — semantic steering from prior iteration
+    if state.judge_guidance:
         sections.append(Section(
-            name="qa_guidance",
-            content=f"## Answer Shape Hints (from question analysis)\n{qa_guidance}",
-            priority=85,
+            name="judge_guidance",
+            content=(
+                f"## Judge Guidance (FOLLOW THIS)\n"
+                f"{state.judge_guidance}"
+            ),
+            priority=94,
             compressible=False,
             heading="",
         ))
 
-    # Data manifest (schema) — critical for code generation
+    # Data manifest (rich schema with DISTINCT values, sample rows)
     sections.append(Section(
         name="manifest",
         content=f"## Data Schema\n{state.manifest_summary}",
@@ -155,26 +137,6 @@ def _build_context_managed_prompt(
             name="domain_rules",
             content=f"## Domain Knowledge\n{state.domain_rules}",
             priority=80,
-            compressible=True,
-            heading="",
-        ))
-
-    # Data profile (column stats, distributions)
-    if state.data_profile_summary:
-        sections.append(Section(
-            name="data_profile",
-            content=f"## Data Profile\n{state.data_profile_summary}",
-            priority=70,
-            compressible=True,
-            heading="",
-        ))
-
-    # Question analysis / strategy (from prior decomposition, if any)
-    if state.question_analysis:
-        sections.append(Section(
-            name="question_analysis",
-            content=f"## Analysis Strategy\n{state.question_analysis}",
-            priority=65,
             compressible=True,
             heading="",
         ))
@@ -200,6 +162,16 @@ def _build_context_managed_prompt(
             content=f"## Prior Steps\n{prior_text}",
             priority=60,
             compressible=True,
+            heading="",
+        ))
+
+    # Last iteration warning
+    if iteration >= max_iterations - 1:
+        sections.append(Section(
+            name="budget",
+            content="## LAST ITERATION — output your best answer now.",
+            priority=98,
+            compressible=False,
             heading="",
         ))
 

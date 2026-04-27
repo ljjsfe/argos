@@ -1,16 +1,21 @@
-"""HarnessGate: deterministic verification layer between Sandbox and Judge.
+"""HarnessGate: deterministic verification layer (zero LLM cost).
 
-Zero LLM cost. Rules derived from eval failure-mode analysis.
+Three-tier exit mechanism (precision-first):
+- "block": answer is definitely wrong → retry with feedback
+- "warn":  answer may be wrong → soft-retry once (iteration 0 only)
+- no flags: accept result
 
-Severity levels:
-- "block": skip Judge, use message as guidance for next iteration
-- "warn":  pass to Judge as reference information
+BLOCK rules (100% precision — zero false-positive tolerance):
+- nan_answer: NaN/null values in answer
+- empty_output: empty DataFrame / 0 rows (existence questions excluded)
+- empty_answer: placeholder values like N/A, null (retrieval questions excluded)
+- dict_string_answer: stringified dict instead of scalar value
+- value_embellishment: formatting artifacts ($, %, units) that break scorer
+- error_string_answer: error messages passed as answer values
+- excuse_answer: "data unavailable/not found" instead of actual computation
 
-Only ``nan_answer`` uses BLOCK (data-validated: 2/2 truly needed).
-All other rules use WARN — cross-run analysis showed BLOCK on other rules
-has net-negative effect (wastes iteration budget without improving scores).
-
-If no flags → normal Judge flow.
+WARN rules: agg_type, output_shape, join_cardinality, row_count_bound,
+extra_columns, qa_column_count, scalar_range, tie_possible.
 """
 
 from __future__ import annotations
@@ -245,7 +250,7 @@ def _check_empty_output(question: str, stdout: str) -> list[HarnessFlag]:
         return []
     return [HarnessFlag(
         rule="empty_output",
-        severity="warn",
+        severity="block",
         message=(
             "Output appears empty (0 rows / empty DataFrame). "
             "Check filter conditions, column names, and data types. "
@@ -391,7 +396,7 @@ def _check_empty_answer(
                 return []
             return [HarnessFlag(
                 rule="empty_answer",
-                severity="warn",
+                severity="block",
                 message=(
                     f"Answer is a placeholder value ('{val_str[:50]}'). "
                     f"The computation likely failed or returned no result. "
@@ -435,7 +440,7 @@ def _check_dict_string_answer(structured_json: str) -> list[HarnessFlag]:
             if isinstance(v, str) and _DICT_STRING_RE.match(v.strip()):
                 return [HarnessFlag(
                     rule="dict_string_answer",
-                    severity="warn",
+                    severity="block",
                     message=(
                         f"Column '{col}' value looks like a Python dict string: "
                         f"'{v[:80]}'. "
@@ -530,7 +535,7 @@ def _check_value_embellishment(structured_json: str) -> list[HarnessFlag]:
         if re.search(pattern, combined, re.IGNORECASE):
             flags.append(HarnessFlag(
                 rule="value_embellishment",
-                severity="warn",
+                severity="block",
                 message=(
                     f"Answer values contain {desc}. "
                     f"Scorer does exact string matching — "
@@ -540,6 +545,113 @@ def _check_value_embellishment(structured_json: str) -> list[HarnessFlag]:
             ))
             break  # one warning is enough
     return flags
+
+
+# ---------------------------------------------------------------------------
+# Rule 9b: Error string in answer
+# ---------------------------------------------------------------------------
+
+_ERROR_PREFIXES = [
+    "error during", "error:", "exception:", "could not",
+    "failed to", "no code generated", "unable to",
+    "traceback (most recent call last)",
+    "file not found", "filenotfounderror",
+]
+
+
+def _check_error_string_answer(structured_json: str) -> list[HarnessFlag]:
+    """Rule 9b: detect error messages passed as answer values.
+
+    Pattern: code caught an exception and called save_result(answer={"col": [error_msg]})
+    instead of propagating the error. The scorer receives an error string instead of data.
+
+    Safeguards: only matches values starting with known error prefixes AND
+    longer than 10 characters to avoid false positives on short legitimate values.
+    """
+    if not structured_json:
+        return []
+    try:
+        data = json.loads(structured_json)
+        answer = data.get("answer", {})
+        if not isinstance(answer, dict):
+            return []
+    except (json.JSONDecodeError, ValueError):
+        return []
+
+    for col, vals in answer.items():
+        if not isinstance(vals, list):
+            continue
+        for v in vals:
+            if not isinstance(v, str) or len(v) < 10:
+                continue
+            v_lower = v.strip().lower()
+            for prefix in _ERROR_PREFIXES:
+                if v_lower.startswith(prefix):
+                    return [HarnessFlag(
+                        rule="error_string_answer",
+                        severity="block",
+                        message=(
+                            f"Answer contains error message in column '{col}': "
+                            f"'{v[:80]}'. "
+                            f"The code caught an error and passed it as the answer "
+                            f"instead of fixing the underlying issue. "
+                            f"Fix the data loading or computation error."
+                        ),
+                    )]
+    return []
+
+
+# ---------------------------------------------------------------------------
+# Rule 9c: Excuse answer detection
+# ---------------------------------------------------------------------------
+
+_EXCUSE_PATTERNS = [
+    r"(?:data|budget|file|information|table|column)\s+(?:not\s+found|unavailable|missing)",
+    r"(?:cannot|can't|could not|couldn't|unable to)\s+(?:complete|find|determine|locate|access|calculate|compute)",
+    r"no\s+(?:data|results?|records?|matching\s+\w+)\s+(?:found|available|exist)",
+    r"(?:insufficient|inadequate)\s+(?:data|information)",
+    r"data\s+(?:is\s+)?not\s+available",
+]
+
+
+def _check_excuse_answer(structured_json: str) -> list[HarnessFlag]:
+    """Rule 9c: detect 'excuse answers' where the code gave up.
+
+    Pattern: code couldn't find data and returned an explanation string
+    like "Budget data unavailable" instead of computing an actual answer.
+
+    Safeguards: only matches string values >= 10 chars with known excuse patterns.
+    """
+    if not structured_json:
+        return []
+    try:
+        data = json.loads(structured_json)
+        answer = data.get("answer", {})
+        if not isinstance(answer, dict):
+            return []
+    except (json.JSONDecodeError, ValueError):
+        return []
+
+    for col, vals in answer.items():
+        if not isinstance(vals, list):
+            continue
+        for v in vals:
+            if not isinstance(v, str) or len(v) < 10:
+                continue
+            v_lower = v.strip().lower()
+            for pattern in _EXCUSE_PATTERNS:
+                if re.search(pattern, v_lower):
+                    return [HarnessFlag(
+                        rule="excuse_answer",
+                        severity="block",
+                        message=(
+                            f"Answer contains an excuse instead of data in column "
+                            f"'{col}': '{v[:80]}'. The code gave up instead of "
+                            f"finding the data. Check file paths, table names, "
+                            f"and column names in the data schema."
+                        ),
+                    )]
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -770,6 +882,8 @@ def check(
     flags.extend(_check_dict_string_answer(structured_json))
     flags.extend(_check_nan_values(structured_json))
     flags.extend(_check_value_embellishment(structured_json))
+    flags.extend(_check_error_string_answer(structured_json))
+    flags.extend(_check_excuse_answer(structured_json))
 
     # QA-spec checks
     flags.extend(_check_qa_column_count(spec, structured_json))

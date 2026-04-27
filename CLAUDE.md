@@ -2,7 +2,7 @@
 
 ## What This Is
 
-`dataline` is a command-line data analytics agent. Given a folder of mixed-format data files and a natural language question, it reasons across those files and returns a structured answer table.
+`dataline` is a general-purpose data analytics agent. Given heterogeneous data files (any format) and a natural language question, it reasons across those files and returns a structured answer.
 
 ```bash
 python main.py --task ./data/demo/input/task_11 --output ./results/task_11
@@ -10,39 +10,71 @@ python main.py --task ./data/demo/input/task_11 --output ./results/task_11
 
 Output: `prediction.csv` + `trace.json`
 
-**Dual goals:**
-1. Open-source framework for data analysis agents
-2. Competition: KDD Cup 2026 + DABstep (proving grounds)
+**Core goal**: A general data agent that handles complex heterogeneous data scenarios — not tied to any single benchmark or approach.
+
+**Proving grounds**: KDD Cup 2026 (structured tabular) + DABstep (financial payments). These validate the core loop but don't cover the full vision (multi-modal, large-scale, dirty data).
 
 ---
 
-## Architecture: Incremental Plan-Code-Verify Loop
+## Architecture: Infrastructure-First, Thin LLM
 
-NOT one-shot ReAct. NOT upfront full plan. Inspired by DS-STAR.
+**Core principle: push complexity from LLM to infrastructure.** Every piece of data understanding that can be done deterministically should be. The LLM only handles what requires natural language reasoning.
+
+This principle emerged organically: v13 had 11 LLM calls where Analyzer/Judge/QuestionAnalyzer were compensating for infrastructure gaps (Profiler computed DISTINCT values but compress_manifest discarded them). Fixing the infrastructure (rich schema passthrough, JSON registration, SQL detection) made those LLM calls redundant — each removal was a consequence of the layer below getting better, not a design copy from elsewhere.
 
 ```
-Input (task dir)
+Data Sources (any format)
     │
-Profiler (deterministic, zero LLM cost) → Manifest
+Adapter Layer (pluggable readers per format)
+    │  ← detect → parse → register → profile
     │
-Analyzer (deep profiling via code execution) → DataProfile + DomainRules
+Profiler (deterministic, zero LLM cost)
+    │  → rich schema: columns, types, DISTINCT values, sample rows, relationships
+    │  → domain rules from documentation files
     │
-QuestionAnalyzer (1 LLM call) → QuestionSpec (answer shape)
+QuestionSpec (deterministic, zero LLM cost)
+    │  → regex/heuristic → answer_type, row_count, computation_type, tie_possible
     │
-Loop (max 8 iterations):
-    PlannerCoder → plan + code candidates (SQL or Python) in ONE call
-    Sandbox      → try candidates in order, first success wins
-        └─ all fail → Debugger → retry (max 2)
-    HarnessGate  → deterministic verification (zero LLM cost, 13 rules)
-        ├─ block → skip Judge, use message as guidance, retry
-        └─ warn  → pass to Judge as reference
-    Judge        → sufficiency + shape verification + routing + guidance
-        ├─ finish    → exit loop
-        ├─ continue  → loop (guidance passed to next PlannerCoder call)
-        └─ backtrack → truncate to step N, re-plan
+PlannerCoder (1 LLM call)
+    │  → question + rich schema + judge_guidance → executable code (SQL or Python)
+    │  → multi-candidate: 2-3 candidates, first success wins
     │
-Finalizer → prediction.csv + trace.json
+Sandbox (dual-engine execution)
+    │  → Structured data: DuckDB — CSV/JSON/SQLite/Parquet as views, unified SQL
+    │  → Non-structured data: Python — pandas, specialized libraries
+    │  → Language auto-detected; PlannerCoder chooses, Sandbox dispatches
+    │  → Code failure (rc!=0) → skip to next iteration (never accept failed code)
+    │
+HarnessGate (deterministic verification, zero LLM cost)
+    │  ├─ block → feedback to PlannerCoder, retry (skip Judge)
+    │  ├─ warn (first iteration) → soft retry once with guidance
+    │  └─ pass/warn → continue to Judge
+    │
+Judge (1 LLM call, semantic verification)
+    │  ├─ finish → accept result
+    │  ├─ continue → retry with guidance
+    │  └─ backtrack → restart from earlier step
+    │
+Finalizer (1 LLM call) → prediction.csv + trace.json
 ```
+
+**Current: 3-5 LLM calls per task (PlannerCoder + Judge + Finalizer, +retries).**
+
+### Context Management
+
+ContextManager (CM) assembles the PlannerCoder prompt within token budget:
+- Sections ranked by priority: question (100) > harness_feedback (96) > judge_guidance (94) > manifest (90) > domain_rules (80) > prior_steps (60)
+- Over-budget sections are compressed (smart_truncate or LLM summarize)
+- Domain rules compiled when exceeding budget fraction (large docs)
+- Scales to large manifests and multi-iteration history without manual tuning
+
+### Extension Points
+
+The architecture extends by adding **adapters**, not LLM complexity:
+- Today: CSV, SQLite, JSON, Parquet, Markdown, PDF, DOCX, Excel, Image
+- Future: OCR for scanned tables, API connectors, streaming data, graph data
+- Structured adapters register data as DuckDB views; non-structured adapters provide Python-accessible objects
+- The core loop (profile → reason → execute → verify) stays the same
 
 ---
 
@@ -50,11 +82,10 @@ Finalizer → prediction.csv + trace.json
 
 | Agent | File | Role |
 |-------|------|------|
-| Analyzer | `dataline/agents/analyzer.py` | Generates + executes profiling scripts per file |
-| QuestionAnalyzer | `dataline/agents/question_analyzer.py` | Infers answer shape (QuestionSpec) before loop — 1 LLM call |
+| Profiler | `dataline/profiler/manifest.py` | Deterministic scanning + rich schema extraction (zero LLM) |
+| DomainRules | `dataline/agents/analyzer.py` | Extract business rules from docs (deterministic + optional LLM compilation) |
 | PlannerCoder | `dataline/agents/planner_coder.py` | Plans + generates code (SQL/Python) candidates in ONE call |
 | HarnessGate | `dataline/agents/harness_gate.py` | Deterministic verification (13 rules, zero LLM cost) |
-| Judge | `dataline/agents/judge.py` | Sufficiency + shape verification + routing + guidance |
 | Debugger | `dataline/agents/debugger.py` | Fixes code using traceback + data context |
 | Finalizer | `dataline/agents/finalizer.py` | Formats results → prediction.csv |
 | Orchestrator | `dataline/agents/orchestrator.py` | Unified loop wiring all agents |
@@ -65,27 +96,28 @@ Finalizer → prediction.csv + trace.json
 
 | Decision | Rationale |
 |----------|-----------|
+| Infrastructure > LLM calls | Fixing infra bugs was worth more than adding LLM calls — deterministic quality dominates |
+| Rich deterministic profiling | DISTINCT values, sample rows, cardinality in schema → LLM doesn't need to "explore" data |
+| DuckDB as unified query layer | CSV, JSON, SQLite, Parquet all registered as views → single SQL dialect for everything |
+| SQL-first for structured data | Declarative and precise; LLM generates correct SQL at higher rate than pandas |
 | PlannerCoder merged | Same reasoning process shouldn't be split — avoids info loss between plan→code |
-| Multi-candidate output | LLM outputs 2-3 code candidates per call; try in order, first success wins (free) |
-| SQL-first for structured data | SQL is declarative and precise; LLM generates correct SQL at higher rate than pandas |
-| HarnessGate (deterministic) | 13 rules catch structural errors at zero LLM cost before Judge sees the result |
-| QuestionAnalyzer (shape inference) | One LLM call pre-loop; feeds HarnessGate QA rules + PlannerCoder guidance |
-| Shape verification in Judge | Catches partial results: answer shape must match question type (scalar/list/table) |
-| Persistent sandbox state | Never re-execute completed steps |
-| Profiler is zero LLM cost | Deterministic, testable, saves tokens |
+| Multi-candidate output | LLM outputs 2-3 code candidates; try in order, first success wins (free) |
+| HarnessGate (deterministic) | 15 rules, 7 BLOCK + 8 WARN — never accepts known-bad answers (no fatigue downgrade) |
+| Judge (lightweight LLM) | 1 LLM call for semantic verification after HarnessGate PASS — data shows ~4% catch rate on 3B model, but architecturally correct |
+| QuestionSpec (deterministic) | Regex/heuristic shape inference, zero LLM — enables HarnessGate shape rules |
+| Code failure → retry | rc!=0 skips to next iteration — never accepts failed code output |
 | No framework (no LangChain) | ~3000 lines of Python, no overhead |
 | Immutable data types | Frozen dataclasses only, no mutation |
-| Qwen3.5-35B-A3B primary LLM | Official eval model; MoE 35B/3B-active, 262K context |
+| Pluggable adapter layer | New data formats = new reader, not new agent logic |
 
 ---
 
 ## LLM Configuration
 
 - **Eval model**: Qwen3.5-35B-A3B (MoE, 35B total / 3B active params, 262K context)
-- **Dev access**: DashScope — `qwen3.5-35b-a3b`, `https://dashscope.aliyuncs.com/compatible-mode/v1`
-- **Eval runtime**: Model served externally via vLLM; agent reads `MODEL_API_URL`, `MODEL_API_KEY`, `MODEL_NAME` from **environment variables** (must not hardcode)
-- **Config file**: `config.yaml` (dev defaults; env vars override at eval time)
-- **Prompt implications**: 3B active params = small model. Prompts must be concise, explicit, low-ambiguity. Complex multi-step instructions degrade fast.
+- **Env vars**: `MODEL_API_URL`, `MODEL_API_KEY`, `MODEL_NAME` (env vars override `config.yaml`)
+- **Dev access**: DashScope — see `config.yaml`
+- **Prompt constraint**: 3B active params = small model. Prompts must be concise, explicit, low-ambiguity. Complex multi-step instructions degrade fast.
 
 ---
 
@@ -118,7 +150,7 @@ python eval/compare.py results/eval_A results/eval_B
 dataline/
 ├── core/          # types.py, llm_client.py, sandbox.py
 ├── profiler/      # manifest.py + readers (csv, sqlite, json, md, pdf, docx, excel, image, parquet)
-├── agents/        # orchestrator + 7 agent roles (+ harness_gate, question_analyzer)
+├── agents/        # orchestrator + agent roles (planner_coder, harness_gate, debugger, finalizer)
 ├── synthesizer/   # base.py, normalizer.py
 ├── prompts/       # .md prompt templates per agent
 ├── eval/          # scorer, run_eval, diagnostics, failure_analysis
@@ -158,11 +190,8 @@ Source: https://dataagent.top/rules (retrieved 2026-04-25)
 | Total runtime | **12 hours for ~400 tasks** (~108s avg/task) |
 | Network | **No external internet**; only internal MODEL_API_URL |
 
-### Time Budget — Critical Design Constraint
-12h / 400 tasks = ~108s per task average. Current architecture (max 8 iterations × LLM calls) can easily burn 5-10 min per task. **Must implement**:
-- Fast path for easy/medium tasks (1-2 iterations)
-- Adaptive iteration budget based on difficulty
-- Fail-fast: write best-so-far prediction.csv and move on (partial results still score)
+### Time Budget
+12h / 400 tasks = ~108s per task average. Current v16 architecture averages ~11s/task (2-3 LLM calls), well within budget. Room for adaptive complexity: simple tasks stay fast, complex tasks can use more iterations.
 
 ### Environment Variables (injected at eval)
 ```

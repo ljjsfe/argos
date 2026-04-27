@@ -1,12 +1,16 @@
 """QuestionAnalyzer: infer answer shape before the main loop.
 
-One LLM call to produce a QuestionSpec (answer_type, column_count, row_count,
-value_style). Fed to HarnessGate (Rules 10-13) and PlannerCoder (guidance).
+Two modes:
+- analyze_deterministic(question) — regex/heuristic, zero LLM cost (default)
+- analyze_llm(question, manifest, domain_rules, llm) — one LLM call (legacy)
 
 Design principles:
-- Fail-open: any error returns all-unknown spec, never blocks the pipeline.
-- notes field is NOT injected into downstream prompts (may contain wrong
-  semantic interpretation). Only structural hints (to_guidance()) are used.
+- Fail-open: any ambiguity returns all-unknown spec, never blocks the pipeline.
+- Conservative: only classify when high confidence. 6 known misclassification
+  patterns from dry-run (task_199, task_25, task_27, task_80, task_86, task_173)
+  informed the rule priority and safeguards.
+- notes field is NOT injected into downstream prompts. Only structural hints
+  (to_guidance()) are used.
 """
 
 from __future__ import annotations
@@ -28,16 +32,230 @@ _PROMPT_TEMPLATE = (
 _UNKNOWN_SPEC = QuestionSpec()
 
 
-def analyze(
+# ---------------------------------------------------------------------------
+# Deterministic inference (zero LLM cost)
+# ---------------------------------------------------------------------------
+
+# "list" patterns — checked BEFORE aggregation to avoid "list the total" → agg
+_LIST_PATTERNS = [
+    r"\blist\s+(?:all|the|out|their)\b",
+    r"\bplease\s+list\b",
+    r"\bwhat\s+are\s+the\s+\w+s\b",  # "what are the names/bonds/..."
+]
+
+# Count patterns — "how many", "the number of X" (not "his number")
+_COUNT_PATTERNS = [
+    r"\bhow\s+many\b",
+    r"\bthe\s+(?:total\s+)?number\s+of\b",
+    r"\bcount\s+(?:of|the)\b",
+]
+
+# Ratio/percentage patterns
+_RATIO_PATTERNS = [
+    r"\bwhat\s+(?:is\s+the\s+)?percentage\b",
+    r"\bcalculate\s+the\s+percentage\b",
+    r"\bwhat\s+(?:is\s+the\s+)?(?:ratio|fraction|proportion)\b",
+    r"\bhow\s+much\s+(?:faster|slower|more|less)\s+in\s+percentage\b",
+    r"\bpercentage\s+of\b",
+]
+
+# Aggregation patterns — sum/avg/min/max
+_AGG_PATTERNS = [
+    r"\b(?:what\s+is\s+the\s+)?(?:average|mean)\b",
+    r"\b(?:what\s+is\s+the\s+)?(?:total|sum)\b",
+]
+
+# Superlative patterns — triggers tie_possible + aggregate
+_SUPERLATIVE_PATTERNS = [
+    r"\b(?:minimum|maximum|lowest|highest|most|least|fewest|"
+    r"largest|smallest|best|worst|fastest|slowest|longest|shortest)\b",
+]
+
+# Top/bottom N patterns
+_TOP_N_PATTERN = r"\b(?:top|bottom)\s+(\d+)\b"
+
+# Grouping patterns — "for each", "per", "by"
+_GROUP_PATTERNS = [
+    r"\bfor\s+each\b",
+    r"\bper\s+\w+\b",
+    r"\bgroup(?:ed)?\s+by\b",
+]
+
+# Singular lookup — "what is the X of Y", "identify the", "provide the"
+_SINGULAR_LOOKUP_PATTERNS = [
+    r"\bwhat\s+is\s+(?:the\s+)?(?:name|surname|gender|colour|color|"
+    r"telephone|phone|email|title|reference|id)\b",
+    r"\bwho\s+is\b",
+    r"\bidentify\s+the\b",
+    r"\bprovide\s+the\b",
+    r"\bstate\s+the\b",
+    r"\bwrite\s+the\b",
+    r"\bwhat(?:'s| is)\s+\w+(?:'s)?\s+(?:major|name|gender|role)\b",
+]
+
+# Multi-field detection: "X and Y" or "X, Y, and Z" in question
+_MULTI_FIELD_PATTERN = r"\b(?:and\s+(?:the\s+)?(?:their|its|the|his|her))\b"
+
+
+def _matches_any(text: str, patterns: list[str]) -> bool:
+    """Return True if text matches any pattern (case-insensitive)."""
+    return any(re.search(p, text, re.IGNORECASE) for p in patterns)
+
+
+def _has_specific_entity(text: str) -> bool:
+    """Detect if question references a specific entity (ID, name in quotes)."""
+    return bool(
+        re.search(r'(?:id|ID)\s*(?:=\s*|No\.?\s*|")\s*\w+', text)
+        or re.search(r'"[^"]{3,}"', text)
+        or re.search(r"'[^']{3,}'", text)
+    )
+
+
+def analyze_deterministic(question: str) -> QuestionSpec:
+    """Infer structural shape from question text using regex heuristics.
+
+    Zero LLM cost. Fail-open: returns all-unknown spec on any ambiguity.
+    Conservative: designed to avoid the 6 known misclassification patterns.
+    """
+    if not question.strip():
+        return _UNKNOWN_SPEC
+
+    q = question.strip()
+
+    # ── Check for list patterns FIRST (higher priority than aggregation) ──
+    if _matches_any(q, _LIST_PATTERNS) and not _has_specific_entity(q):
+        col_count = _estimate_column_count(q)
+        return QuestionSpec(
+            answer_type="list",
+            expected_column_count=col_count,
+            expected_row_count="multiple",
+            value_style="unknown",
+            computation_type="lookup",
+        )
+
+    # ── Top/bottom N ──
+    top_match = re.search(_TOP_N_PATTERN, q, re.IGNORECASE)
+    if top_match:
+        col_count = _estimate_column_count(q)
+        return QuestionSpec(
+            answer_type="list",
+            expected_column_count=col_count,
+            expected_row_count="multiple",
+            value_style="mixed",
+            computation_type="aggregate",
+        )
+
+    # ── Grouping → table ──
+    if _matches_any(q, _GROUP_PATTERNS):
+        return QuestionSpec(
+            answer_type="table",
+            expected_row_count="multiple",
+            value_style="mixed",
+            computation_type="aggregate",
+        )
+
+    # ── Superlative (min/max/best/...) ──
+    if _matches_any(q, _SUPERLATIVE_PATTERNS):
+        col_count = _estimate_column_count(q)
+        return QuestionSpec(
+            answer_type="scalar",
+            expected_column_count=col_count,
+            expected_row_count="one_or_more",  # ties possible
+            value_style="unknown",
+            computation_type="aggregate",
+            tie_possible=True,
+        )
+
+    # ── Count patterns ──
+    if _matches_any(q, _COUNT_PATTERNS):
+        # Guard: "his number" / "the number" (attribute) vs "number of X" (count)
+        if re.search(r"\b(?:his|her|its|the)\s+number\b", q, re.IGNORECASE):
+            # Ambiguous — could be attribute, not count. Fail-open.
+            pass
+        else:
+            return QuestionSpec(
+                answer_type="scalar",
+                expected_column_count=1,
+                expected_row_count="single",
+                value_style="numeric",
+                computation_type="count",
+            )
+
+    # ── Ratio / percentage ──
+    if _matches_any(q, _RATIO_PATTERNS):
+        return QuestionSpec(
+            answer_type="scalar",
+            expected_column_count=1,
+            expected_row_count="single",
+            value_style="numeric",
+            computation_type="ratio",
+        )
+
+    # ── Aggregation (avg/sum/total) — only if no "list" keyword present ──
+    if _matches_any(q, _AGG_PATTERNS) and not _matches_any(q, _LIST_PATTERNS):
+        col_count = _estimate_column_count(q)
+        return QuestionSpec(
+            answer_type="scalar",
+            expected_column_count=col_count,
+            expected_row_count="single",
+            value_style="numeric",
+            computation_type="aggregate",
+        )
+
+    # ── Singular lookup — conservative, don't assume single row ──
+    if _matches_any(q, _SINGULAR_LOOKUP_PATTERNS):
+        col_count = _estimate_column_count(q)
+        return QuestionSpec(
+            answer_type="scalar",
+            expected_column_count=col_count,
+            expected_row_count="unknown",  # don't assume single
+            value_style="name",
+            computation_type="lookup",
+        )
+
+    # ── Tally = enumerate ──
+    if re.search(r"\btally\b", q, re.IGNORECASE):
+        return QuestionSpec(
+            answer_type="list",
+            expected_row_count="multiple",
+            value_style="unknown",
+            computation_type="lookup",
+        )
+
+    return _UNKNOWN_SPEC
+
+
+def _estimate_column_count(question: str) -> int:
+    """Estimate expected column count from question structure.
+
+    Returns 0 (unknown) if uncertain, never over-counts.
+    """
+    # Explicit "X and Y" pattern for multiple requested fields
+    # e.g., "list their ID, sex and disease"
+    #        "the names and funding types"
+    conjunctions = re.findall(
+        r"\b(?:and\s+(?:the(?:ir)?\s+)?)",
+        question,
+        re.IGNORECASE,
+    )
+    if conjunctions:
+        # Rough: 1 base field + 1 per conjunction, but cap at 3
+        return min(1 + len(conjunctions), 3)
+
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# LLM-based inference (legacy, kept for potential future use)
+# ---------------------------------------------------------------------------
+
+def analyze_llm(
     question: str,
     manifest_summary: str,
     domain_rules: str,
     llm: Any,
 ) -> QuestionSpec:
-    """Infer structural shape of the expected answer.
-
-    Returns QuestionSpec. On any failure, returns all-unknown spec (fail-open).
-    """
+    """Infer structural shape via one LLM call. Legacy — prefer analyze_deterministic."""
     if not question.strip():
         return _UNKNOWN_SPEC
 

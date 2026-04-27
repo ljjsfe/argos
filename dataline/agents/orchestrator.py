@@ -1,14 +1,18 @@
 """Orchestrator: unified loop coordinating all agents.
 
-Pipeline (v5):
-  Profiler → Analyzer → QuestionAnalyzer → Loop(PlannerCoder → Sandbox → HarnessGate → Judge) → Finalizer
+Pipeline (v18 — deterministic fixes + Judge re-enable):
+  Profiler → DomainRules → QuestionSpec(deterministic)
+  → Loop(PlannerCoder → Sandbox → HarnessGate → Judge) → Finalizer
 
-Changes from v4:
-- QuestionAnalyzer runs once before loop, produces QuestionSpec
-- HarnessGate sits between Sandbox and Judge (zero LLM cost)
-  - block flags → skip Judge, use message as guidance
-  - warn flags → passed to Judge as reference
-- Skeptic removed (experimentally proven 0% effective)
+Key design (v18):
+- Four-tier exit: BLOCK → retry, WARN+iter0 → soft-retry, PASS → Judge → accept/retry
+- 7 BLOCK rules (100% precision): nan, empty_output, empty_answer, dict_string,
+  value_embellishment, error_string_answer, excuse_answer
+- BLOCK never downgrades — known-bad answers never accepted
+- Code failure (rc!=0) skips to next iteration, not accepted
+- Judge (1 LLM call) provides semantic verification after HarnessGate PASS
+- Best clean result tracked for fallback on max_iterations exhaustion
+- LLM calls: PlannerCoder(1-3) + Judge(0-3) + Finalizer(1) = 3-5 typical
 """
 
 from __future__ import annotations
@@ -36,7 +40,6 @@ from ..core.tracing_llm import TracingLLMClient
 from ..core.types import (
     AnalysisState,
     HarnessFlag,
-    JudgeDecision,
     Manifest,
     PlanStep,
     SandboxResult,
@@ -45,7 +48,8 @@ from ..core.types import (
 from ..core.workspace import Workspace
 from ..profiler import manifest as profiler
 from ..profiler.manifest import manifest_to_json
-from . import analyzer, judge, debugger, finalizer, harness_gate, question_analyzer
+from . import analyzer, debugger, finalizer, harness_gate, judge as judge_agent
+from .question_analyzer import analyze_deterministic
 from .planner_coder import generate as planner_coder_generate, PlannerCoderOutput
 from .code_validator import validate_column_references
 
@@ -83,11 +87,8 @@ def run_task(
     """Run the full agent pipeline on a single task."""
     start_time = time.time()
     trace: list[dict] = []
-    max_iterations = config.get("agent", {}).get("max_iterations", 8)
-    min_iterations = config.get("agent", {}).get("min_iterations", 1)
+    max_iterations = config.get("agent", {}).get("max_iterations", 3)
     max_retries = config.get("agent", {}).get("max_retries", 2)
-    backtrack_limit = config.get("agent", {}).get("backtrack_limit", 3)
-    stagnation_threshold = config.get("agent", {}).get("stagnation_threshold", 2)
 
     # Initialize tracer for real-time progress + LLM I/O logging
     tracer = TaskTracer(task_id, output_dir, session_id=session_id)
@@ -109,7 +110,6 @@ def run_task(
     obs: dict[str, Any] = {
         "profiler": {},
         "analyzer": {},
-        "question_analyzer": {},
         "iterations": [],
         "final": {},
     }
@@ -130,70 +130,49 @@ def run_task(
             "total_size_bytes": sum(e.size_bytes for e in manifest.entries),
         }
 
-        # ─── Stage 2: Analyze (deep profiling + domain rule extraction) ───
-        with tracer.span("analyzer"):
-            _log(trace, "analyzer", "Running deep data analysis")
-            data_profile, domain_rules_raw = analyzer.analyze(
-                manifest, traced_llm, sandbox,
-            )
-            _log(trace, "analyzer", f"Profile: {len(data_profile)} chars, "
-                 f"domain rules: {len(domain_rules_raw)} chars")
+        # ─── Stage 2: Domain rules (deterministic, zero LLM cost) ───
+        with tracer.span("domain_rules"):
+            _log(trace, "domain_rules", "Extracting domain rules from docs")
+            domain_rules_raw = analyzer._extract_domain_rules(manifest)
 
-        # Compile domain rules if they exceed budget fraction
-        with tracer.span("domain_compiler"):
+            # Compile if very large (conditional LLM call)
             domain_rules = analyzer.compile_domain_rules(
                 domain_rules_raw, traced_llm, cm.budget_tokens,
             )
             if len(domain_rules) < len(domain_rules_raw):
-                _log(trace, "domain_compiler",
+                _log(trace, "domain_rules",
                      f"Compiled: {len(domain_rules_raw)} → {len(domain_rules)} chars")
 
         workspace.write_domain_rules(domain_rules)
-        workspace.write_data_profile(data_profile)
 
         obs["analyzer"] = {
-            "profile_length_chars": len(data_profile),
             "domain_rules_length_chars": len(domain_rules),
-            "analysis_success": len(data_profile) > 50,
-        }
-
-        # ─── Stage 2b: QuestionAnalyzer (1 LLM call, infer answer shape) ───
-        with tracer.span("question_analyzer"):
-            _log(trace, "question_analyzer", "Inferring answer shape")
-            question_spec = question_analyzer.analyze(
-                question, manifest_json, domain_rules, traced_llm,
-            )
-            qa_guidance = question_spec.to_guidance()
-            _log(trace, "question_analyzer",
-                 f"type={question_spec.answer_type}, "
-                 f"cols={question_spec.expected_column_count}, "
-                 f"rows={question_spec.expected_row_count}, "
-                 f"style={question_spec.value_style}")
-
-        obs["question_analyzer"] = {
-            "answer_type": question_spec.answer_type,
-            "expected_column_count": question_spec.expected_column_count,
-            "expected_row_count": question_spec.expected_row_count,
-            "value_style": question_spec.value_style,
         }
 
         # ─── Stage 3: Initialize state ───
         state = create_initial_state(
-            task_id, question, manifest, data_profile, domain_rules,
+            task_id, question, manifest, "", domain_rules,
         )
 
-        # Inject QA analysis into state for downstream agents
-        if qa_guidance:
-            state = set_question_analysis(state, qa_guidance)
+        # ─── Stage 3b: Deterministic question shape inference (zero LLM) ───
+        question_spec = analyze_deterministic(question)
+        spec_guidance = question_spec.to_guidance()
+        if spec_guidance:
+            state = set_question_analysis(state, spec_guidance)
+            _log(trace, "question_spec",
+                 f"Inferred: {question_spec.answer_type}/{question_spec.computation_type}"
+                 f" rows={question_spec.expected_row_count}")
+        obs["question_spec"] = {
+            "answer_type": question_spec.answer_type,
+            "computation_type": question_spec.computation_type,
+            "expected_row_count": question_spec.expected_row_count,
+            "tie_possible": question_spec.tie_possible,
+        }
 
         # Track execution state
         steps_done: list[StepRecord] = []
-        backtracks_used = 0
-        stagnation_count = 0
-        strategy_changes_used = 0
-        max_strategy_changes = 1
-        judge_guidance = ""
-        consecutive_blocks: dict[str, int] = {}  # rule -> consecutive count
+        # Best non-blocked result for fallback when max_iterations exhausted
+        best_clean_result: tuple[StepRecord, str, SandboxResult] | None = None
 
         # ─── Stage 4: Unified Loop ───
         for iteration in range(max_iterations):
@@ -201,18 +180,12 @@ def run_task(
             _log(trace, "iteration", f"--- Iteration {iteration} ---")
             iter_obs: dict[str, Any] = {"iteration": iteration}
 
-            # Update state with judge guidance from prior iteration
-            if judge_guidance:
-                state = update_judge_guidance(state, judge_guidance)
-                workspace.write_judge_guidance(judge_guidance)
-
             # ── PlannerCoder: plan + generate code candidates ──
             with tracer.span("planner_coder", metadata={"iteration": iteration}):
                 _log(trace, "planner_coder", "Planning and generating code")
                 pc_output = planner_coder_generate(
-                    question, manifest_json, data_profile, steps_done,
+                    question, manifest_json, "", steps_done,
                     traced_llm, state=state, cm=cm,
-                    qa_guidance=qa_guidance,
                     iteration=iteration,
                     max_iterations=max_iterations,
                 )
@@ -278,10 +251,11 @@ def run_task(
                 for retry in range(max_retries):
                     with tracer.span("debugger", metadata={"retry": retry}):
                         fixed_code = debugger.fix(
-                            base_code, base_result, manifest_json, data_profile,
+                            base_code, base_result, manifest_json, "",
                             traced_llm, state=state, cm=cm,
                             retry_number=retry,
                             previous_attempts=previous_attempts,
+                            question=question,
                         )
                     new_result = sandbox.execute(
                         fixed_code, step_id=f"{step_id}_fix{retry}",
@@ -300,6 +274,23 @@ def run_task(
                 if result is None or result.return_code != 0:
                     result = base_result
                     winning_code = base_code
+
+            # ── Code failure: skip to next iteration (don't accept bad output) ──
+            if result.return_code != 0:
+                _log(trace, "orchestrator",
+                     f"All code failed at iteration {iteration} — retrying")
+                iter_obs["code_success"] = False
+                iter_obs["judge_action"] = "continue (all_code_failed)"
+                # Still record step for context in next iteration
+                step_record = StepRecord(
+                    plan=pc_output.plan, code=winning_code,
+                    result=result, step_index=iteration,
+                )
+                steps_done.append(step_record)
+                finding = summarize_step_output(result.stdout)
+                state = add_step(state, step_record, finding)
+                obs["iterations"].append(iter_obs)
+                continue
 
             # Write step to workspace
             workspace.write_step(iteration, winning_code, result.stdout)
@@ -328,36 +319,12 @@ def run_task(
                 code=winning_code,
                 stdout=result.stdout,
                 return_code=result.return_code,
-                data_profile=data_profile,
+                data_profile=state.manifest_summary,
                 question_spec=question_spec,
                 structured_json=result.structured_json,
             )
 
-            # ── Block fatigue: downgrade repeated blocks to warns ──
-            current_block_rules = {f.rule for f in harness_flags if f.severity == "block"}
-            for rule in current_block_rules:
-                consecutive_blocks[rule] = consecutive_blocks.get(rule, 0) + 1
-            # Clear counters for rules that didn't block this iteration
-            for rule in list(consecutive_blocks):
-                if rule not in current_block_rules:
-                    consecutive_blocks[rule] = 0
-
-            fatigued_rules = {
-                rule for rule, count in consecutive_blocks.items()
-                if count >= 3
-            }
-            if fatigued_rules:
-                harness_flags = [
-                    HarnessFlag(
-                        rule=f.rule, severity="warn",
-                        message=f"[fatigue] {f.message}",
-                    ) if f.severity == "block" and f.rule in fatigued_rules
-                    else f
-                    for f in harness_flags
-                ]
-                _log(trace, "harness_gate",
-                     f"Block fatigue: {fatigued_rules} downgraded to warn (≥3 consecutive)")
-
+            # ── Classify flags (no fatigue downgrade — BLOCKs stay BLOCKs) ──
             blocking = [f for f in harness_flags if f.severity == "block"]
             warnings = [f for f in harness_flags if f.severity == "warn"]
 
@@ -373,107 +340,86 @@ def run_task(
                 ]
 
             if blocking:
-                # Skip Judge — write block messages to harness_feedback channel
+                # Known-bad answer — retry without Judge
                 harness_msg = "\n".join(
                     f"[{f.rule}] {f.message}" for f in blocking
                 )
                 state = update_harness_feedback(state, harness_msg)
                 _log(trace, "harness_gate",
-                     f"BLOCKED — skipping Judge, {len(blocking)} block flags")
-                iter_obs["judge_sufficient"] = False
+                     f"BLOCKED — {len(blocking)} block flags, retrying")
                 iter_obs["judge_action"] = "continue (harness_blocked)"
                 obs["iterations"].append(iter_obs)
-
-                prev_guidance = judge_guidance
                 continue
 
-            # Clear harness_feedback when not blocked (judge will evaluate)
-            if state.harness_feedback:
-                state = update_harness_feedback(state, "")
+            # ── Track best non-blocked result for fallback ──
+            best_clean_result = (step_record, winning_code, result)
 
-            # ── Judge: sufficiency + routing + guidance ──
+            # ── WARN soft-retry: retry once on first iteration ──
+            if warnings and iteration == 0:
+                harness_msg = "\n".join(
+                    f"[{f.rule}] {f.message}" for f in warnings
+                )
+                state = update_harness_feedback(state, harness_msg)
+                _log(trace, "harness_gate",
+                     f"WARN soft-retry — {len(warnings)} warnings, retrying once")
+                iter_obs["judge_action"] = "continue (warn_soft_retry)"
+                obs["iterations"].append(iter_obs)
+                continue
+
+            # ── Judge: semantic verification (1 LLM call) ──
             with tracer.span("judge", metadata={"iteration": iteration}):
-                _log(trace, "judge", "Evaluating progress")
-                verdict = judge.evaluate(
-                    question, steps_done, traced_llm,
-                    state=state, cm=cm,
-                    iteration=iteration, max_iterations=max_iterations,
+                judge_decision = judge_agent.evaluate(
+                    question=question,
+                    steps_done=steps_done,
+                    llm=traced_llm,
+                    state=state,
+                    cm=cm,
+                    iteration=iteration,
+                    max_iterations=max_iterations,
                     harness_warnings=warnings,
                 )
-            _log(trace, "judge",
-                 f"sufficient={verdict.sufficient}, action={verdict.action}, "
-                 f"missing={verdict.missing}")
 
-            iter_obs["judge_sufficient"] = verdict.sufficient
-            iter_obs["judge_action"] = verdict.action
-            iter_obs["judge_reasoning"] = verdict.reasoning
-            iter_obs["judge_guidance"] = verdict.guidance_for_next_step
+            _log(trace, "judge",
+                 f"Decision: {judge_decision.action} | "
+                 f"Reasoning: {judge_decision.reasoning[:120]}")
+            iter_obs["judge_action"] = judge_decision.action
+            iter_obs["judge_reasoning"] = judge_decision.reasoning
+
+            if judge_decision.action == "finish":
+                if state.harness_feedback:
+                    state = update_harness_feedback(state, "")
+                _log(trace, "orchestrator",
+                     f"Judge accepted — finishing at iteration {iteration}")
+                obs["iterations"].append(iter_obs)
+                break
+
+            # Judge says continue or backtrack — store guidance for next iteration
+            if judge_decision.action == "backtrack":
+                truncate_to = judge_decision.truncate_to
+                state = truncate_to_step(state, truncate_to)
+                _log(trace, "judge", f"Backtrack to step {truncate_to}")
+
+            if judge_decision.guidance_for_next_step:
+                state = update_judge_guidance(
+                    state, judge_decision.guidance_for_next_step,
+                )
+            if warnings:
+                warn_msg = "\n".join(
+                    f"[{f.rule}] {f.message}" for f in warnings
+                )
+                state = update_harness_feedback(state, warn_msg)
+
             obs["iterations"].append(iter_obs)
 
-            # Store guidance for next iteration
-            prev_guidance = judge_guidance
-            judge_guidance = verdict.guidance_for_next_step
-
-            # ── Loop control ──
-            if verdict.action == "finish":
-                if iteration < min_iterations - 1:
-                    _log(trace, "orchestrator",
-                         f"Overriding premature finish at iteration {iteration} "
-                         f"(min_iterations={min_iterations})")
-                    judge_guidance = (
-                        verdict.missing
-                        or "Verify the results: cross-check against the data, "
-                        "confirm row counts, and validate assumptions."
-                    )
-                else:
-                    break
-
-            elif verdict.action == "backtrack" and backtracks_used < backtrack_limit:
-                truncate_to = max(0, min(verdict.truncate_to, len(steps_done) - 1))
-                steps_done = steps_done[:truncate_to]
-                state = truncate_to_step(state, truncate_to)
-                backtracks_used += 1
-                stagnation_count = 0
-                judge_guidance = ""
-                _log(trace, "judge", f"Backtracked to step {truncate_to}")
-
+        else:
+            # Loop exhausted max_iterations without break
+            if best_clean_result is not None:
+                step_record, winning_code, result = best_clean_result
+                _log(trace, "orchestrator",
+                     "Max iterations — using best non-blocked result")
             else:
-                # Stagnation detection
-                step_failed = result.return_code != 0
-                guidance_repeated = (
-                    prev_guidance
-                    and verdict.guidance_for_next_step
-                    and prev_guidance.strip()[:80] == verdict.guidance_for_next_step.strip()[:80]
-                )
-
-                if guidance_repeated and not step_failed:
-                    _log(trace, "orchestrator",
-                         "Guidance repeated without code failure — "
-                         "accepting current result.")
-                    break
-
-                if step_failed:
-                    stagnation_count += 1
-                else:
-                    stagnation_count = 0
-
-                if stagnation_count >= stagnation_threshold:
-                    if strategy_changes_used >= max_strategy_changes:
-                        _log(trace, "orchestrator",
-                             "Early stop: stagnation persists after strategy change")
-                        break
-                    strategy_changes_used += 1
-                    _log(trace, "orchestrator",
-                         f"Forcing strategy change #{strategy_changes_used}")
-                    judge_guidance = (
-                        "MANDATORY STRATEGY CHANGE: The previous approach has failed "
-                        f"{stagnation_count} consecutive times. Use a completely "
-                        "different strategy — different columns, different joins, "
-                        "different data loading method, or re-read raw data."
-                    )
-                    stagnation_count = 0
-                    state = set_question_analysis(state, "")
-                    qa_guidance = ""  # clear local var to match state
+                _log(trace, "orchestrator",
+                     "Max iterations — all blocked, accepting last result")
 
         # ─── Stage 5: Finalizer ───
         with tracer.span("finalizer"):
@@ -482,7 +428,6 @@ def run_task(
                 question, steps_done, traced_llm,
                 state=state, cm=cm, benchmark=benchmark,
                 guidelines=guidelines,
-                question_spec=question_spec,
             )
         _log(trace, "finalizer", f"Answer columns: {list(answer.keys())}")
 
@@ -497,7 +442,6 @@ def run_task(
 
         obs["final"] = {
             "total_iterations": len(obs["iterations"]),
-            "backtracks_used": backtracks_used,
             "answer_columns": list(answer.keys()),
             "answer_rows": len(next(iter(answer.values()), [])) if answer else 0,
             "success": True,
@@ -552,18 +496,28 @@ def _detect_language(code: str, planner_hint: str) -> str:
     """Detect whether a candidate is raw SQL or a Python script.
 
     Raw SQL: starts with SELECT/WITH/INSERT/CREATE or contains no Python
-    keywords (import, def, print, =). The planner_hint from PlannerCoder
-    is used as a tiebreaker.
+    keywords. The planner_hint from PlannerCoder is used as a tiebreaker.
     """
     stripped = code.strip()
     first_word = stripped.split()[0].upper() if stripped else ""
 
     # Obvious SQL starters
-    if first_word in ("SELECT", "WITH", "INSERT", "CREATE", "UPDATE", "DELETE",
-                      "ATTACH", "PRAGMA", "EXPLAIN"):
-        # But if it also has Python (import, def), it's a Python script with SQL inside
+    sql_starters = ("SELECT", "WITH", "INSERT", "CREATE", "UPDATE", "DELETE",
+                    "ATTACH", "PRAGMA", "EXPLAIN")
+    if first_word in sql_starters:
+        # Only reject as SQL if it has unambiguous Python keywords
+        # (not "= " which matches SQL WHERE/ON clauses)
         has_python = any(
-            kw in code for kw in ("import ", "def ", "print(", "from ", "= ", "if ")
+            kw in code for kw in ("import ", "def ", "print(", "from ", "class ")
+        )
+        if not has_python:
+            return "sql"
+
+    # Trust planner hint when code doesn't obviously start with SQL
+    # but also doesn't have Python keywords
+    if planner_hint == "sql" and first_word not in ("", ):
+        has_python = any(
+            kw in code for kw in ("import ", "def ", "print(", "from ", "class ")
         )
         if not has_python:
             return "sql"
