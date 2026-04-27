@@ -203,11 +203,13 @@ def run_task(
                  f"Plan: {pc_output.plan.step_description} | "
                  f"Language: {pc_output.language} | "
                  f"Candidates: {len(pc_output.candidates)} | "
+                 f"Parse: {pc_output.parse_status} | "
                  f"Reasoning: {pc_output.reasoning[:100]}")
 
             iter_obs["plan_description"] = pc_output.plan.step_description
             iter_obs["language"] = pc_output.language
             iter_obs["num_candidates"] = len(pc_output.candidates)
+            iter_obs["parse_status"] = pc_output.parse_status
             iter_obs["reasoning"] = pc_output.reasoning
 
             # ── Execute candidates in order ──

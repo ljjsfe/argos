@@ -142,6 +142,14 @@ run eval → read diagnostics → identify bottleneck agent → fix → re-run e
 
 **Never** optimize without running eval first. The diagnostic output (`eval/diagnostics.py`) tells you exactly which agent is failing and why.
 
+**Always commit before each eval run.** Every eval result must correspond to a known git SHA so we can attribute score changes to specific code versions and revert cleanly. Workflow:
+1. Finish code change + tests pass
+2. `git commit` with a descriptive message (`feat:` / `fix:` / `refactor:`)
+3. Run eval with output dir tagged by version (e.g. `eval_v21_<topic>_<date>`)
+4. Compare vs prior tagged run
+
+No exceptions — even quick experimental runs commit first (use `wip:` prefix if uncertain).
+
 Key eval commands:
 ```bash
 # Run single task
