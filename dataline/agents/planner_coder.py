@@ -159,6 +159,26 @@ def _build_context_managed_prompt(
                 heading="",
             ))
 
+    # Ratio computation hint — narrow injection, only when QuestionSpec
+    # confidently identifies the question as a division/ratio. Targets
+    # "how many times X more than Y" / "what percentage" misclassifications
+    # where PlannerCoder otherwise generates COUNT(...) or 0/1 indicators.
+    # Keeps blast radius minimal: only fires when ratio pattern matched.
+    if state.question_analysis and "Computation type: RATIO" in state.question_analysis:
+        sections.append(Section(
+            name="ratio_hint",
+            content=(
+                "## Computation Hint\n"
+                "This question asks for a RATIO (division), not a count. "
+                "Compute X / Y where X and Y are aggregate values "
+                "(sums, counts, averages, or single measurements). "
+                "Do NOT return COUNT() of comparisons or 0/1 binary indicators."
+            ),
+            priority=93,
+            compressible=False,
+            heading="",
+        ))
+
     # Data manifest (rich schema with DISTINCT values, sample rows)
     sections.append(Section(
         name="manifest",
