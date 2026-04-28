@@ -55,11 +55,37 @@ _AGG_RULES: list[tuple[list[str], str, list[str]]] = [
 ]
 
 
+_SUM_AS_AVG_PATTERNS = [
+    # SUM(x) / 12  or  SUM(x)/12.0  → annual-to-monthly normalization
+    re.compile(r"SUM\s*\([^)]*\)\s*/\s*\d+(?:\.\d+)?", re.IGNORECASE),
+    # SUM(x) / COUNT(...) → standard mean decomposition
+    re.compile(r"SUM\s*\([^)]*\)\s*/\s*COUNT\s*\(", re.IGNORECASE),
+    # .sum() / N or .sum() / len(...) in pandas
+    re.compile(r"\.sum\s*\(\s*\)\s*/\s*(?:\d+|len\s*\(|count)", re.IGNORECASE),
+]
+
+
+def _is_sum_as_average(code: str) -> bool:
+    """Detect SUM(...)/N or SUM(...)/COUNT(...) — a legitimate decomposed average.
+
+    "average monthly" / "average per customer" semantics often require
+    SUM-divided-by-period rather than row-wise AVG. Skip the agg_type rule
+    when this pattern is present.
+    """
+    return any(p.search(code) for p in _SUM_AS_AVG_PATTERNS)
+
+
 def _check_agg_type(question: str, code: str) -> list[HarnessFlag]:
     q_lower = question.lower()
     flags: list[HarnessFlag] = []
     for keywords, expected, forbidden in _AGG_RULES:
         if not any(kw in q_lower for kw in keywords):
+            continue
+        # Skip the rule when the code uses SUM/N or SUM/COUNT — that is a
+        # valid decomposed-average and was the dominant false-positive on
+        # "average monthly / per X" questions in v21 (e.g. task_169).
+        is_avg_rule = any(kw in keywords for kw in ("average", "avg", "mean"))
+        if is_avg_rule and _is_sum_as_average(code):
             continue
         for fb in forbidden:
             if fb in code:

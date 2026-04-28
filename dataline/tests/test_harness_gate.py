@@ -9,6 +9,7 @@ import json
 import pytest
 
 from dataline.agents.harness_gate import (
+    _check_agg_type,
     _check_dict_string_answer,
     _check_empty_answer,
     _check_empty_output,
@@ -353,3 +354,52 @@ class TestCheckIntegration:
             structured_json="",
         )
         assert len(flags) == 0
+
+
+# ---------------------------------------------------------------------------
+# agg_type: SUM-as-average false-positive guard (P0-B)
+# ---------------------------------------------------------------------------
+
+
+class TestAggTypeSumAsAverage:
+    """Skip agg_type WARN when code uses SUM(x)/N or SUM(x)/COUNT(...).
+
+    These are valid decomposed-average forms — e.g. "average monthly
+    consumption" → SUM(consumption)/12, not AVG(consumption). The pre-fix
+    rule wrongly flagged this as a mismatch and locked task_169 in v21.
+    """
+
+    def test_sum_divided_by_literal_is_valid_average(self):
+        flags = _check_agg_type(
+            "What is the average monthly consumption?",
+            "SELECT SUM(c.Consumption) / 12.0 AS avg_monthly FROM yearmonth c",
+        )
+        assert flags == []
+
+    def test_sum_divided_by_count_is_valid_average(self):
+        flags = _check_agg_type(
+            "What is the average salary across departments?",
+            "SELECT SUM(salary) / COUNT(DISTINCT dept_id) FROM employees",
+        )
+        assert flags == []
+
+    def test_pandas_sum_divided_by_n_is_valid_average(self):
+        flags = _check_agg_type(
+            "What is the average value?",
+            "result = df['x'].sum() / 12",
+        )
+        assert flags == []
+
+    def test_plain_sum_without_division_still_flags_average(self):
+        flags = _check_agg_type(
+            "What is the average salary?",
+            "SELECT SUM(salary) FROM employees",
+        )
+        assert any(f.rule == "agg_type" for f in flags)
+
+    def test_sum_with_min_keyword_still_flags(self):
+        flags = _check_agg_type(
+            "What is the lowest salary?",
+            "SELECT SUM(salary) / 10 FROM employees",
+        )
+        assert any(f.rule == "agg_type" for f in flags)

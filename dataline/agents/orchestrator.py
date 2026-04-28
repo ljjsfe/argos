@@ -183,6 +183,10 @@ def run_task(
         best_clean_result: tuple[StepRecord, str, SandboxResult] | None = None
         # Track per-rule WARN counts for escalation
         warn_counts: dict[str, int] = {}  # rule_name → consecutive count
+        # Track per-rule code seen while escalation has fired — if the agent
+        # produces the same code after a BLOCK escalation, the rule is most
+        # likely wrong and locking the agent. Demote back to WARN.
+        escalated_codes: dict[str, set[str]] = {}
 
         # ─── Stage 4: Unified Loop ───
         for iteration in range(max_iterations):
@@ -354,21 +358,37 @@ def run_task(
                 if rule not in current_warn_rules:
                     warn_counts[rule] = 0
 
-            # Escalate
+            # Escalate — but only when the agent has actually changed code
+            # since the last BLOCK from this rule. If the same code keeps
+            # producing the same WARN, the rule is wrong and locking the
+            # agent (see task_169 in v21: 7 consecutive identical SUM/12
+            # blocked queries because agg_type fired on a valid decomposed
+            # average). Demoting back to WARN lets the loop progress.
             escalated: list[HarnessFlag] = []
             remaining_warnings: list[HarnessFlag] = []
+            code_signature = (winning_code or "").strip()
             for f in warnings:
-                if (f.rule in _ESCALATION_WHITELIST
-                        and warn_counts.get(f.rule, 0) >= 3):
-                    escalated.append(HarnessFlag(
-                        rule=f.rule,
-                        severity="block",
-                        message=_escalated_harness_message(
-                            f, warn_counts[f.rule], question_spec,
-                        ),
-                    ))
-                else:
+                eligible = (
+                    f.rule in _ESCALATION_WHITELIST
+                    and warn_counts.get(f.rule, 0) >= 3
+                )
+                if not eligible:
                     remaining_warnings.append(f)
+                    continue
+                seen_codes = escalated_codes.setdefault(f.rule, set())
+                if code_signature and code_signature in seen_codes:
+                    # Already escalated on this exact code — the rule is
+                    # not converging. Stop escalating; keep the WARN.
+                    remaining_warnings.append(f)
+                    continue
+                seen_codes.add(code_signature)
+                escalated.append(HarnessFlag(
+                    rule=f.rule,
+                    severity="block",
+                    message=_escalated_harness_message(
+                        f, warn_counts[f.rule], question_spec,
+                    ),
+                ))
 
             if escalated:
                 blocking = blocking + escalated

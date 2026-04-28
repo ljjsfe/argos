@@ -53,12 +53,27 @@ ties before rejecting a small multi-row entity result.
 | Question type | Expected shape |
 |---|---|
 | "How many" / "total" / "average" / "percentage" | Single number (1 row) |
-| "What is the X of Y?" | Single value |
+| "What is the X of Y?" | One row OR several rows (see note below) |
 | "List" / "which" (plural) | Multiple rows, 1 column |
 | "X and Y of Z?" | 1 row, multiple columns |
 | "For each" / "per" | Table (N rows × M columns) |
 
-RED FLAG if shape doesn't match. Specify what's wrong in guidance.
+**CRITICAL — multi-row answers can be correct.** The article "the" in
+"the date / the driver / the X" does NOT prove the answer is unique:
+
+- "What is the date X paid dues?" → may legitimately have multiple dates
+- "What is the driver who finished 0:01:54?" → ties possible (multiple drivers)
+- "Which event has the lowest cost?" → ties on lowest value give multiple events
+
+**Do NOT recommend `LIMIT 1` or `ORDER BY ... DESC LIMIT 1` to force
+singularity** unless the question explicitly says "the most recent",
+"the latest", "the single", "the only", or similar disambiguating phrase.
+If the raw output already has 2-5 plausible rows, that is likely the
+correct answer — choose finish, not continue.
+
+RED FLAG if shape doesn't match (e.g. count question returning 50 rows,
+or list question returning a single scalar). DO NOT flag a 2-5 row
+answer to a "what is the X" question — accept it.
 
 ### Step 4 — Iteration context
 
