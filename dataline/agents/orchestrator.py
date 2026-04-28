@@ -258,7 +258,7 @@ def run_task(
                 else:
                     _log(trace, "sandbox",
                          f"Candidate {ci} ({candidate_lang}) failed: "
-                         f"{candidate_result.stderr[:200]}")
+                         f"{candidate_result.stderr[:1500]}")
 
             # If all candidates failed, try debugger on the first one
             if result is None or result.return_code != 0:
