@@ -20,10 +20,11 @@ from ..profiler.manifest import manifest_to_json
 logger = logging.getLogger(__name__)
 
 # Compilation threshold: compile when domain rules exceed this fraction
-# of the CM budget. At 30% of 175K budget ≈ 52K tokens (~200K chars),
-# this only fires for truly large docs that would risk token overflow.
-# Tune based on eval results.
-_COMPILE_BUDGET_FRACTION = 0.30
+# of the CM budget. At 8% of 262K budget ≈ 21K tokens (~84K chars),
+# this fires for any doc over ~84KB to prevent per-iteration token burn.
+# Root cause: task_396 (178KB, 44K tok) was included raw in all 8 iterations
+# = 352K tokens wasted. Compilation fires once, producing a compact summary.
+_COMPILE_BUDGET_FRACTION = 0.08
 
 # Chunk size for extremely large docs (in chars).
 # Each chunk must fit within the LLM's context window for compilation.
