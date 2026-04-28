@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -187,6 +188,10 @@ def run_task(
         # produces the same code after a BLOCK escalation, the rule is most
         # likely wrong and locking the agent. Demote back to WARN.
         escalated_codes: dict[str, set[str]] = {}
+        # Track consecutive block counts per rule for stagnation detection.
+        # When the same block rule fires ≥3 times in a row, the agent is
+        # stuck — add a stagnation alert to force a completely new approach.
+        block_rule_counts: dict[str, int] = {}
 
         # ─── Stage 4: Unified Loop ───
         for iteration in range(max_iterations):
@@ -412,15 +417,64 @@ def run_task(
 
             if blocking:
                 # Known-bad answer — retry without Judge
+                block_rules = [f.rule for f in blocking]
+                # Stagnation detection: if the same rule fires ≥3 consecutive
+                # times the agent is stuck. Prepend a STAGNATION alert.
+                stagnation_rules = []
+                for rule in block_rules:
+                    block_rule_counts[rule] = block_rule_counts.get(rule, 0) + 1
+                    if block_rule_counts[rule] >= 3:
+                        stagnation_rules.append(rule)
+                # Reset counts for rules not firing this iteration
+                for rule in list(block_rule_counts):
+                    if rule not in block_rules:
+                        block_rule_counts[rule] = 0
+
                 harness_msg = "\n".join(
                     f"[{f.rule}] {f.message}" for f in blocking
                 )
+                if stagnation_rules:
+                    stagnation_msg = (
+                        f"STAGNATION ALERT: Rule(s) {stagnation_rules} have blocked "
+                        f"{max(block_rule_counts[r] for r in stagnation_rules)} times in a row. "
+                        f"Your current approach is fundamentally wrong for this data. "
+                        f"Try a COMPLETELY DIFFERENT method: different table, "
+                        f"different column, different join, or switch language (SQL↔Python)."
+                    )
+                    harness_msg = stagnation_msg + "\n\n" + harness_msg
+                    _log(trace, "harness_gate",
+                         f"STAGNATION detected for {stagnation_rules} — injecting pivot guidance")
+
                 state = update_harness_feedback(state, harness_msg)
                 _log(trace, "harness_gate",
                      f"BLOCKED — {len(blocking)} block flags, retrying")
                 iter_obs["judge_action"] = "continue (harness_blocked)"
                 obs["iterations"].append(iter_obs)
                 continue
+
+            # ── Non-blocking iteration: reset block counts ──
+            for rule in list(block_rule_counts):
+                block_rule_counts[rule] = 0
+
+            # ── Guard: if code ran but save_result() was never called, force retry ──
+            if not result.structured_json:
+                has_computed_output = bool(re.search(
+                    r'(?:percentage|count|total|average|result|sum|mean|ratio)[:\s=]+[\d.]+',
+                    result.stdout, re.IGNORECASE,
+                ))
+                if has_computed_output:
+                    save_msg = (
+                        "[missing_save_result] Code produced a numeric result but "
+                        "save_result() was never called — the answer was not captured. "
+                        "You MUST call save_result(answer={'column_name': [value]}) "
+                        "at the END of your code. Do not just print() the result."
+                    )
+                    state = update_harness_feedback(state, save_msg)
+                    _log(trace, "harness_gate",
+                         "BLOCKED — code computed answer but save_result() not called")
+                    iter_obs["judge_action"] = "continue (missing_save_result)"
+                    obs["iterations"].append(iter_obs)
+                    continue
 
             # ── Track best non-blocked result for fallback ──
             best_clean_result = (step_record, winning_code, result)
@@ -464,6 +518,23 @@ def run_task(
             iter_obs["judge_reasoning"] = judge_decision.reasoning
 
             if judge_decision.action == "finish":
+                # Guard: never accept finish with empty structured_json.
+                # If save_result() wasn't called, the finalizer would write
+                # an empty prediction regardless of what Judge "saw" in stdout.
+                if not result.structured_json:
+                    save_msg = (
+                        "[missing_save_result] Judge says done but save_result() "
+                        "was never called — the answer cannot be captured. "
+                        "You MUST end your code with: "
+                        "save_result(answer={'column_name': [value]})"
+                    )
+                    state = update_harness_feedback(state, save_msg)
+                    _log(trace, "harness_gate",
+                         "BLOCKED — Judge finish overridden: save_result() not called")
+                    iter_obs["judge_action"] = "continue (finish_overridden_missing_save_result)"
+                    obs["iterations"].append(iter_obs)
+                    continue
+
                 if state.harness_feedback:
                     state = update_harness_feedback(state, "")
                 _log(trace, "orchestrator",
