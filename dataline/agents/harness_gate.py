@@ -460,8 +460,21 @@ def _check_dict_string_answer(structured_json: str) -> list[HarnessFlag]:
         return []
 
     for col, vals in answer.items():
+        # Case A: value is a dict object directly — agent passed a dict instead of a list
+        if isinstance(vals, dict):
+            return [HarnessFlag(
+                rule="dict_string_answer",
+                severity="block",
+                message=(
+                    f"Column '{col}' value is a Python dict: {str(vals)[:80]}. "
+                    f"save_result() must receive a list of scalar values, not a dict. "
+                    f"Use: save_result(answer={{'col1': [val1], 'col2': [val2]}}) "
+                    f"where each key maps to a list of row values."
+                ),
+            )]
         if not isinstance(vals, list):
             continue
+        # Case B: value is a list but contains stringified dicts
         for v in vals:
             if isinstance(v, str) and _DICT_STRING_RE.match(v.strip()):
                 return [HarnessFlag(
