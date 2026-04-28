@@ -784,7 +784,9 @@ def _check_qa_column_count(
             ),
         )]
     if actual > expected:
-        severity = "warn"
+        # BLOCK when answer has 2x or more extra columns — clearly wrong.
+        # WARN for mild violations (actual == expected + 1) to allow escalation.
+        severity = "block" if actual >= expected * 2 else "warn"
         return [HarnessFlag(
             rule="qa_column_count",
             severity=severity,

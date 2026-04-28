@@ -353,6 +353,7 @@ def run_task(
             # ── WARN escalation: whitelisted rules → BLOCK after ≥3 fires ──
             _ESCALATION_WHITELIST = {
                 "agg_type",
+                "qa_column_count",  # mild extra-column violations escalate after ≥3 fires
             }
             # Update counts for current warnings
             current_warn_rules = {f.rule for f in warnings}

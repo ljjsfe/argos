@@ -224,6 +224,20 @@ def analyze_deterministic(question: str) -> QuestionSpec:
             computation_type="lookup",
         )
 
+    # ── "Which X" filter-lookup — entity selection with a filter condition ──
+    # Example: "Which race was Alex Yoong in when he was in track number < 20?"
+    # The answer is the entity name only (1 column), not the filter value.
+    # Must be last before UNKNOWN to avoid over-riding other patterns.
+    if re.search(r"^\s*which\s+\w+", q, re.IGNORECASE) and not _matches_any(q, _GROUP_PATTERNS):
+        col_count = _estimate_column_count(q)
+        return QuestionSpec(
+            answer_type="list",
+            expected_column_count=col_count,  # typically 1 from _estimate_column_count
+            expected_row_count="one_or_more",
+            value_style="name",
+            computation_type="lookup",
+        )
+
     return _UNKNOWN_SPEC
 
 
@@ -278,6 +292,13 @@ def _estimate_column_count(question: str) -> int:
         r"duration|speed|temperature|population|area|volume)\b",
         question, re.IGNORECASE,
     ):
+        return 1
+
+    # "Which X ..." at question start → asking for a single entity → 1 column.
+    # Guard: skip when output_and matched (e.g. "which race and which driver").
+    # This handles task_86 ("Which race was Alex Yoong in...") and task_25
+    # ("Which event has the lowest cost?") where the answer is entity name only.
+    if not output_and and re.search(r"^\s*which\s+\w+", q, re.IGNORECASE):
         return 1
 
     return 0
