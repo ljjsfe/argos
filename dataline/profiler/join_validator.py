@@ -40,6 +40,24 @@ class ForeignKeyHint:
     relationship: str    # "one_to_one" | "many_to_one" | "many_to_many"
 
 
+def _is_sequential_integers(values_a: list, values_b: list) -> bool:
+    """Return True if both value lists look like row-counter IDs (1, 2, 3, …).
+
+    Criteria: all values are integers AND max_value ≤ 1.5 × count, indicating
+    a dense integer sequence rather than a semantic identifier space.
+    """
+    def _dense_int_sequence(vals: list) -> bool:
+        try:
+            ints = [int(v) for v in vals if v is not None]
+            if len(ints) < 2:
+                return False
+            return min(ints) >= 0 and max(ints) <= len(ints) * 1.5
+        except (ValueError, TypeError):
+            return False
+
+    return _dense_int_sequence(values_a) and _dense_int_sequence(values_b)
+
+
 def validate_join_keys(
     entry_a: ManifestEntry,
     entry_b: ManifestEntry,
@@ -64,6 +82,12 @@ def validate_join_keys(
                 value_overlap_pct=0.0,
                 confidence=0.3,  # low confidence: name match only
             ))
+            continue
+
+        # Skip generic row-counter columns (id, index, row_id) whose values
+        # are sequential integers in both tables — these produce 100% overlap
+        # but carry no semantic FK meaning (both just number their rows 1,2,3…).
+        if col_name.lower() in ("id", "index", "row_id", "rowid") and _is_sequential_integers(values_a, values_b):
             continue
 
         set_a = {str(v).lower().strip() for v in values_a}
@@ -122,10 +146,20 @@ def _extract_top_values(col_info: dict) -> list:
 # Cross-name FK discovery
 # ---------------------------------------------------------------------------
 
-# Patterns for columns that might be foreign keys pointing to another table
-_FK_LIKE_RE = re.compile(
-    r"(?i)(?:_id$|_key$|_code$|^id$|^key$|^code$|_ref$|_link$|_fk$)",
+# Patterns for columns that might be foreign keys pointing to another table.
+# Split into two patterns: case-insensitive for snake_case/bare names,
+# case-SENSITIVE for camelCase (setCode, languageId) — combining them with (?i)
+# would make the camelCase pattern match all-lowercase too.
+_FK_LIKE_CI_RE = re.compile(
+    r"(?i)(?:_id$|_key$|_code$|^id$|^key$|^code$|_ref$|_link$|_fk$)"
 )
+_FK_LIKE_CAMEL_RE = re.compile(
+    r"[a-z](?:Id|Code|Key|Ref)$"  # case-sensitive: lowercase letter + TitleCase suffix
+)
+
+
+def _is_fk_like(col_name: str) -> bool:
+    return bool(_FK_LIKE_CI_RE.search(col_name) or _FK_LIKE_CAMEL_RE.search(col_name))
 
 # Patterns for columns that might be primary keys (targets of FK references)
 _PK_LIKE_RE = re.compile(
@@ -203,7 +237,7 @@ def discover_cross_name_fks(
     seen: set[tuple[str, str, str, str]] = set()  # avoid duplicates
 
     for i, (entry_a, table_a, col_a, vals_a) in enumerate(source_columns):
-        if not _FK_LIKE_RE.search(col_a):
+        if not _is_fk_like(col_a):
             continue
         set_a = {str(v).lower().strip() for v in vals_a if v is not None}
         if len(set_a) < 2:  # need at least 2 distinct values to compare

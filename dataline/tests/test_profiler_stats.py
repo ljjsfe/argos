@@ -8,7 +8,7 @@ from dataline.profiler.column_stats import (
     compressed_value_repr,
     detect_anomalies,
 )
-from dataline.profiler.join_validator import validate_join_keys, JoinHint
+from dataline.profiler.join_validator import validate_join_keys, discover_cross_name_fks, JoinHint, _is_fk_like
 from dataline.core.types import ManifestEntry
 
 
@@ -157,11 +157,12 @@ class TestValidateJoinKeys:
         )
 
     def test_overlap_detected(self):
+        # Use non-sequential IDs (1001+) so they aren't filtered as row counters
         entry_a = self._make_entry("a.csv", [
-            {"name": "id", "sample": ["1", "2", "3"]},
+            {"name": "id", "sample": ["1001", "1002", "1003"]},
         ])
         entry_b = self._make_entry("b.csv", [
-            {"name": "id", "sample": ["2", "3", "4"]},
+            {"name": "id", "sample": ["1002", "1003", "1004"]},
         ])
 
         hints = validate_join_keys(entry_a, entry_b, {"id"})
@@ -172,11 +173,12 @@ class TestValidateJoinKeys:
         assert hints[0].confidence > 0.3
 
     def test_no_overlap(self):
+        # Use non-sequential IDs so they aren't filtered as row counters
         entry_a = self._make_entry("a.csv", [
-            {"name": "id", "sample": ["1", "2", "3"]},
+            {"name": "id", "sample": ["1001", "1002", "1003"]},
         ])
         entry_b = self._make_entry("b.csv", [
-            {"name": "id", "sample": ["10", "20", "30"]},
+            {"name": "id", "sample": ["2001", "2002", "2003"]},
         ])
 
         hints = validate_join_keys(entry_a, entry_b, {"id"})
@@ -197,3 +199,80 @@ class TestValidateJoinKeys:
 
         assert len(hints) == 1
         assert hints[0].confidence == 0.3  # low confidence: no values to compare
+
+    def test_sequential_id_skipped(self):
+        """Row-counter id columns (1,2,3…) produce false 100% overlap — must be skipped."""
+        entry_a = self._make_entry("a.csv", [
+            {"name": "id", "sample": ["1", "2", "3"]},
+        ])
+        entry_b = self._make_entry("b.csv", [
+            {"name": "id", "sample": ["1", "2", "3"]},
+        ])
+
+        hints = validate_join_keys(entry_a, entry_b, {"id"})
+        assert len(hints) == 0  # filtered as sequential row-counter
+
+
+class TestIsFkLike:
+    """Unit tests for _is_fk_like — camelCase and snake_case FK column detection."""
+
+    def test_snake_case_matches(self):
+        assert _is_fk_like("customer_id")
+        assert _is_fk_like("theme_code")
+        assert _is_fk_like("set_key")
+        assert _is_fk_like("parent_ref")
+
+    def test_bare_names_match(self):
+        assert _is_fk_like("id")
+        assert _is_fk_like("code")
+        assert _is_fk_like("key")
+
+    def test_camel_case_matches(self):
+        assert _is_fk_like("setCode")
+        assert _is_fk_like("languageId")
+        assert _is_fk_like("themeKey")
+        assert _is_fk_like("cardRef")
+
+    def test_non_fk_columns_excluded(self):
+        assert not _is_fk_like("name")
+        assert not _is_fk_like("total")
+        assert not _is_fk_like("description")
+        assert not _is_fk_like("price")
+
+    def test_camel_case_all_lower_excluded(self):
+        # "setcode" (all lowercase) should NOT match camelCase pattern
+        assert not _is_fk_like("setcode")
+
+
+class TestDiscoverCrossNameFKs:
+    """Integration test for camelCase FK discovery (task_214 regression)."""
+
+    def _make_entry(self, file_path: str, columns: list[dict]) -> ManifestEntry:
+        return ManifestEntry(
+            file_path=file_path,
+            file_type="csv",
+            size_bytes=100,
+            summary={"columns": columns},
+        )
+
+    def test_camel_case_fk_detected(self):
+        """setCode in set_translations should map to code in sets — the task_214 join."""
+        entry_a = self._make_entry("set_translations.csv", [
+            {"name": "id", "sample": ["1", "2", "3"]},
+            {"name": "setCode", "sample": ["LEA", "ARN", "ATQ", "LEG"]},
+            {"name": "language", "sample": ["EN", "FR", "DE", "EN"]},
+        ])
+        entry_b = self._make_entry("sets.csv", [
+            {"name": "code", "sample": ["LEA", "ARN", "ATQ", "LEG", "M19"]},
+            {"name": "name", "sample": ["Alpha", "Arabian Nights", "Antiquities", "Legends", "Core 2019"]},
+        ])
+
+        hints = discover_cross_name_fks([entry_a, entry_b])
+
+        # Must detect setCode → code FK
+        fk_cols = {(h.left_column, h.right_column) for h in hints}
+        assert ("setCode", "code") in fk_cols, f"Expected setCode→code FK, got: {fk_cols}"
+
+        fk = next(h for h in hints if h.left_column == "setCode" and h.right_column == "code")
+        assert fk.overlap >= 0.5
+        assert fk.confidence >= 0.7
