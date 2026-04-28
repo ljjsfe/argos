@@ -1,11 +1,11 @@
 llm:
   provider: dashscope
-  model: qwen3.5-35b-a3b
+  model: qwen3.6-35b-a3b
   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
   api_key_env: DASHSCOPE_API_KEY
   max_tokens: 8192
   temperature: 0.0
-  context_window: 262144  # Qwen3.5-35B-A3B 262K context
+  context_window: 262144  # Qwen3.6-35B-A3B 262K context
 
 agent:
   max_iterations: 8
