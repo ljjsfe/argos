@@ -38,10 +38,15 @@ Check specifically:
 - Question asks for scalar (count/total/average) but result has multiple rows → shape error
 - Question asks for list but result is a single scalar → shape error
 - Question asks for "top N" but result has far more than N rows → logic error
-- If domain rules exist: does the code follow the documented formula?
 
 **C — Is this just exploration?**
 RED FLAG if this step only prints schema, sample rows, or data types with no answer computed.
+
+**D — Domain formula compliance (skip if no Domain Rules section in context)**
+1. Identify the metric the question asks about (the noun being computed: e.g. "cost", "percentage of X", "total Y").
+2. Search Domain Rules for a definition of that metric. If none mentions it, skip this check.
+3. If a definition exists, compare the code's columns and aggregation against the documented formula.
+RED FLAG if the code uses different columns/aggregations than the documented formula (semantic equivalents like `SUM(CASE WHEN ...)` vs `COUNT(...) FILTER (WHERE ...)` are fine — only flag genuine divergence).
 
 If no red flags → finish.
 
