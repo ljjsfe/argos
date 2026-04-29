@@ -107,8 +107,8 @@ def _build_context_managed_prompt(
 ) -> str:
     """Build budget-managed context — clean and focused.
 
-    Only includes: question, schema, domain rules, harness feedback, prior steps.
-    No redundant data_profile, QA guidance, or question_analysis sections.
+    Includes: question, deterministic shape spec (when confident), schema,
+    domain rules, harness feedback, prior steps.
     """
     sections = []
 
@@ -143,6 +143,22 @@ def _build_context_managed_prompt(
                 f"{state.judge_guidance}"
             ),
             priority=94,
+            compressible=False,
+            heading="",
+        ))
+
+    # Deterministic answer-shape constraints from QuestionSpec.
+    # Generic structural hints (shape, column count, ties, computation type) —
+    # produced by regex/heuristic, never references domain-specific names.
+    # Only injected when the spec has high-confidence signals.
+    if state.question_analysis:
+        sections.append(Section(
+            name="answer_shape",
+            content=(
+                f"## Required Answer Shape (deterministic)\n"
+                f"{state.question_analysis}"
+            ),
+            priority=93,
             compressible=False,
             heading="",
         ))
