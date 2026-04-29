@@ -469,6 +469,8 @@ def save_result(
     td = temp_dir or os.environ.get("TEMP_DIR", ".")
     path = os.path.join(td, "step_result.json")
 
+    answer = _normalize_answer(answer)
+
     payload: dict = {
         "answer": _to_json_serializable(answer),
     }
@@ -483,6 +485,40 @@ def save_result(
     answer_keys = list(payload["answer"].keys()) if isinstance(payload["answer"], dict) else type(payload["answer"]).__name__
     print(f"[step_result] saved — answer keys: {answer_keys}")
     return path
+
+
+def _normalize_answer(answer: Any) -> Any:
+    """Auto-expand common DataFrame-shaped inputs into dict-of-columns.
+
+    The Finalizer expects {"col": [v1, v2, ...]} format. Agents often pass:
+      - DataFrame directly             → convert with df.to_dict('list')
+      - {"key": list_of_dicts}         → expand to {col1: [...], col2: [...]}
+      - {"key": DataFrame}             → expand similarly
+    Returns a dict-of-columns when expansion is unambiguous; otherwise unchanged.
+    """
+    # Bare DataFrame
+    if isinstance(answer, pd.DataFrame):
+        return {str(c): answer[c].tolist() for c in answer.columns}
+
+    if not isinstance(answer, dict) or len(answer) != 1:
+        return answer
+
+    only_key, only_val = next(iter(answer.items()))
+
+    # {"key": DataFrame}
+    if isinstance(only_val, pd.DataFrame):
+        return {str(c): only_val[c].tolist() for c in only_val.columns}
+
+    # {"key": [{"col1":..,"col2":..}, ...]}
+    if isinstance(only_val, list) and only_val and all(
+        isinstance(item, dict) for item in only_val
+    ):
+        # Only expand when every dict shares the same keys (consistent rows)
+        keys = list(only_val[0].keys())
+        if all(set(item.keys()) == set(keys) for item in only_val):
+            return {str(k): [item[k] for item in only_val] for k in keys}
+
+    return answer
 
 
 def _to_json_serializable(val: "Any") -> "Any":
