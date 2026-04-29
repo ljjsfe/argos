@@ -28,8 +28,8 @@ Schema reminders:
 
 ### Step 3 — Write the query
 
-- **Solve in ONE step.** Multi-step plans have much lower success rates.
-- **SQL first**: Use DuckDB SQL for structured data (CSV, JSON, SQLite). Python only when SQL genuinely cannot express the logic (unstructured data, multi-step with prior results).
+- **Single LLM call, but multiple statements OK.** Don't chain across iterations (each iteration loses prior state). Within ONE Python script you can probe data first (`describe_df`, `value_overlap`, `count_distinct`) and then compute the answer. Print probe results so they show up in the trace — this often reveals wrong assumptions about schema, joins, or filter values.
+- **SQL first** for structured data (CSV, JSON, SQLite). Use Python when: data is unstructured (markdown/PDF), you need to verify a schema assumption, or you need pandas-only operations. Both are acceptable — pick what makes the answer cleanest.
 - **Min/max/lowest/highest**: NEVER use `LIMIT 1` — ties exist. Use `WHERE col = (SELECT MIN(col) FROM t)` or `RANK() OVER (...) = 1`.
 - **Percentages**: `COUNT(CASE WHEN cond THEN 1 END) * 100.0 / COUNT(*)` — multiply first to avoid integer division.
 - **Return ONLY columns the question asks for** — extra columns reduce score.
@@ -41,8 +41,16 @@ Schema reminders:
 - **TASK_DIR** / **TEMP_DIR**: env vars available if needed
 - **Libraries**: pandas, numpy, duckdb, json, re, os, pickle, collections, math
 - **Helpers** (`from data_helpers import *`):
-  - `safe_read_csv(filename)`, `safe_read_json_df(filename)` (auto-unwraps `{"records":[...]}`)
-  - `save_result(answer={}, debug={}, row_counts={})` — **MANDATORY** as last line
+  - **I/O**: `safe_read_csv(filename)`, `safe_read_json_df(filename)` (auto-unwraps `{"records":[...]}`), `safe_read_excel(filename)`
+  - **Probe** (cheap data-verification — print results to trace):
+    - `describe_df(df)` → compact dtypes/nunique/sample summary, more useful than `df.info()`
+    - `count_distinct(df, col)` → `{rows, distinct, ratio}`; ratio≈1 means PK, ratio≪1 means many duplicates per value
+    - `value_overlap(df_a, 'col', df_b, 'col')` → real FK overlap on full data (not samples)
+    - `find_join_keys(df_a, df_b)` → shared column names between two DataFrames
+    - `assume_then("rationale", boolean_check)` → record an explicit assumption in the trace
+  - **Cleanup**: `clean_numeric(series)` (handles $, %, commas), `detect_date_columns(df)`
+  - **State**: `save_intermediate(obj, "name")` / `load_intermediate("name")` for cross-iteration pickles
+  - **Result**: `save_result(answer={}, debug={}, row_counts={})` — **MANDATORY** as last line
 
 ## DuckDB SQL
 

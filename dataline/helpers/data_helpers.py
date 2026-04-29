@@ -336,6 +336,63 @@ def clean_numeric(series: pd.Series) -> pd.Series:
     return pd.to_numeric(cleaned, errors="coerce")
 
 
+# --- Quick exploration probes ---
+
+
+def count_distinct(df: pd.DataFrame, col: str) -> dict:
+    """Quick probe: rows vs distinct count for a column.
+
+    Returns {'rows': int, 'distinct': int, 'ratio': float}.
+    A ratio close to 1.0 indicates the column is a primary key /
+    unique identifier in this DataFrame; lower ratios indicate
+    repeated values (e.g. patient_id in a Laboratory table with
+    multiple records per patient).
+    """
+    n = len(df)
+    if n == 0:
+        return {"rows": 0, "distinct": 0, "ratio": 0.0}
+    nd = df[col].nunique(dropna=True)
+    return {"rows": int(n), "distinct": int(nd), "ratio": round(nd / n, 3)}
+
+
+def value_overlap(
+    df_a: pd.DataFrame, col_a: str,
+    df_b: pd.DataFrame, col_b: str,
+) -> dict:
+    """Quick probe: actual value overlap between two columns.
+
+    Computes set-intersection on the FULL column data (not samples).
+    Returns {'left_unique', 'right_unique', 'overlap', 'left_pct', 'right_pct'}.
+
+    Use this to verify whether two columns are a real FK relationship
+    (high left_pct or right_pct) or just shared by name (low both).
+    Distinct from value_repr in manifest, which is sample-based.
+    """
+    set_a = set(df_a[col_a].dropna().unique())
+    set_b = set(df_b[col_b].dropna().unique())
+    inter = set_a & set_b
+    left_pct = round(len(inter) / max(len(set_a), 1), 3)
+    right_pct = round(len(inter) / max(len(set_b), 1), 3)
+    return {
+        "left_unique": len(set_a),
+        "right_unique": len(set_b),
+        "overlap": len(inter),
+        "left_pct": left_pct,
+        "right_pct": right_pct,
+    }
+
+
+def assume_then(claim: str, holds: bool) -> None:
+    """Record an explicit assumption and whether it holds.
+
+    Print a tagged line so the trace shows what the agent assumed and
+    whether the data confirmed it. Helps surface wrong mental models
+    early. Does not raise — execution continues either way.
+    """
+    tag = "ASSUME OK" if holds else "ASSUME FAIL"
+    print(f"[{tag}] {claim}")
+
+
 # --- Pickle helpers ---
 
 
