@@ -28,8 +28,8 @@ Schema reminders:
 
 ### Step 3 — Write the query
 
-- **Single LLM call, but multiple statements OK.** Don't chain across iterations (each iteration loses prior state). Within ONE Python script you can probe data first (`describe_df`, `value_overlap`, `count_distinct`) and then compute the answer. Print probe results so they show up in the trace — this often reveals wrong assumptions about schema, joins, or filter values.
-- **SQL first** for structured data (CSV, JSON, SQLite). Use Python when: data is unstructured (markdown/PDF), you need to verify a schema assumption, or you need pandas-only operations. Both are acceptable — pick what makes the answer cleanest.
+- **Solve in ONE step.** Multi-step plans have much lower success rates.
+- **SQL first**: Use DuckDB SQL for structured data (CSV, JSON, SQLite). Only use Python when SQL genuinely cannot express the logic (unstructured data, multi-step with prior results).
 - **Min/max/lowest/highest**: NEVER use `LIMIT 1` — ties exist. Use `WHERE col = (SELECT MIN(col) FROM t)` or `RANK() OVER (...) = 1`.
 - **Percentages**: `COUNT(CASE WHEN cond THEN 1 END) * 100.0 / COUNT(*)` — multiply first to avoid integer division.
 - **Return ONLY columns the question asks for** — extra columns reduce score.

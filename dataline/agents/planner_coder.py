@@ -42,12 +42,18 @@ _TASK_MODE_HINTS = {
     "python_extract": (
         "Task mode: python_extract\n"
         "Data includes unstructured files (documents/PDFs). "
-        "Use Python to extract relevant data first, then analyze."
+        "Use Python to extract relevant data first, then analyze. "
+        "Within the same script, print probe outputs (`describe_df`, "
+        "`count_distinct`, `value_overlap`) before computing the final "
+        "answer — this catches wrong assumptions about unstructured layouts."
     ),
     "document_needed": (
         "Task mode: document_needed\n"
         "Domain knowledge documents are available. "
-        "Reference domain rules when interpreting column values or thresholds."
+        "Reference domain rules when interpreting column values or thresholds. "
+        "When a column or value's meaning is ambiguous, probe with "
+        "`describe_df` or `count_distinct` inside your script before "
+        "committing to a query — better than guessing and retrying."
     ),
 }
 
