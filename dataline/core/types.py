@@ -124,9 +124,7 @@ class QuestionSpec:
                 "NOT LIMIT 1. Multiple rows may share the extreme value."
             )
         if self.computation_type == "ratio":
-            parts.append(
-                "Computation type: RATIO — compute X / Y (division), not X - Y (difference)."
-            )
+            parts.append("Computation type: ratio (return a single numeric ratio/percentage)")
         return "\n".join(parts) if parts else ""
 
 
