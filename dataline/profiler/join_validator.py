@@ -24,6 +24,7 @@ class JoinHint:
     source_b: str
     value_overlap_pct: float  # 0.0 to 1.0
     confidence: float         # combined confidence score
+    cardinality: str = ""     # "1:1" | "1:N" | "N:1" | "N:N" | "" (unknown)
 
 
 @dataclass(frozen=True)
@@ -106,9 +107,44 @@ def validate_join_keys(
             source_b=entry_b.file_path,
             value_overlap_pct=round(overlap_pct, 3),
             confidence=round(min(confidence, 1.0), 2),
+            cardinality=_infer_cardinality(entry_a, entry_b, col_name),
         ))
 
     return hints
+
+
+def _infer_cardinality(entry_a: ManifestEntry, entry_b: ManifestEntry, col_name: str) -> str:
+    """Infer join cardinality from per-side uniqueness_ratio.
+
+    Returns one of '1:1', '1:N', 'N:1', 'N:N', or '' when uniqueness is unknown.
+    Generic deterministic check — uses full-data uniqueness already computed
+    by column_stats. UNIQUE_THRESHOLD=0.95 to tolerate near-PKs with rare dupes.
+    """
+    UNIQUE_THRESHOLD = 0.95
+
+    def _uniq_ratio(entry: ManifestEntry) -> float | None:
+        col_lower = col_name.lower()
+        for col in entry.summary.get("columns", []):
+            if col.get("name", "").lower() == col_lower:
+                return col.get("uniqueness_ratio")
+        for table in entry.summary.get("tables", []):
+            for col in table.get("columns", []):
+                if col.get("name", "").lower() == col_lower:
+                    return col.get("uniqueness_ratio")
+        return None
+
+    a_ratio, b_ratio = _uniq_ratio(entry_a), _uniq_ratio(entry_b)
+    if a_ratio is None or b_ratio is None:
+        return ""
+    a_unique = a_ratio >= UNIQUE_THRESHOLD
+    b_unique = b_ratio >= UNIQUE_THRESHOLD
+    if a_unique and b_unique:
+        return "1:1"
+    if a_unique and not b_unique:
+        return "1:N"
+    if not a_unique and b_unique:
+        return "N:1"
+    return "N:N"
 
 
 def _extract_values_for_column(entry: ManifestEntry, col_name: str) -> list:

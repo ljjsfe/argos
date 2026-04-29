@@ -31,13 +31,16 @@ def discover_relations(entries: list[ManifestEntry]) -> list[CrossSourceRelation
                 # Validate with actual value overlap
                 hints = validate_join_keys(a, b, overlap)
                 for hint in hints:
+                    parts = [
+                        f"Shared column '{hint.column_name}'",
+                        f"value overlap: {hint.value_overlap_pct:.0%}",
+                    ]
+                    if hint.cardinality:
+                        parts.append(f"cardinality: {hint.cardinality}")
                     relations.append(CrossSourceRelation(
                         source_a=a.file_path,
                         source_b=b.file_path,
-                        relation=(
-                            f"Shared column '{hint.column_name}'"
-                            f" (value overlap: {hint.value_overlap_pct:.0%})"
-                        ),
+                        relation=parts[0] + " (" + ", ".join(parts[1:]) + ")",
                         confidence=hint.confidence,
                     ))
 
