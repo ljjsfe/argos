@@ -25,6 +25,7 @@ Schema reminders:
 - `link_to_X` columns are foreign keys → JOIN with table `X` on its primary key.
 - JOIN keys must have matching types — cast if needed.
 - String comparisons are case-sensitive in DuckDB — use `LOWER()` for case-insensitive matching.
+- If a `RELATION:` line shows `cardinality: 1:N` or `N:1`, joining will repeat rows from the "1" side. When counting entities on that side, use `COUNT(DISTINCT entity_id)` to avoid double-counting.
 
 ### Step 3 — Write the query
 
