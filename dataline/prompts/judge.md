@@ -48,6 +48,15 @@ RED FLAG if this step only prints schema, sample rows, or data types with no ans
 3. If a definition exists, compare the code's columns and aggregation against the documented formula.
 RED FLAG if the code uses different columns/aggregations than the documented formula (semantic equivalents like `SUM(CASE WHEN ...)` vs `COUNT(...) FILTER (WHERE ...)` are fine — only flag genuine divergence).
 
+**E — HarnessGate Warnings (deterministic AST/SQL checks; if a `## HarnessGate Warnings` section is present)**
+
+Treat these rules as authoritative — they are structural checks, not heuristics. RED FLAG if any are present:
+- `agg_type`: aggregation method does not match the question (SUM vs AVG, etc.).
+- `nan_answer`: answer column contains NaN/null values.
+- `output_shape`: row/column count contradicts the question's shape.
+
+For other rules (`sql_column_count`, `qa_column_count`, etc.), override only if you can articulate a concrete reason the warning misfires on this specific code (e.g. multiple legitimate answer columns).
+
 If no red flags → finish.
 
 ### Step 3 — Does the answer match the question?
