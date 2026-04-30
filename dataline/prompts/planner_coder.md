@@ -54,7 +54,8 @@ Schema reminders:
 
 ## DuckDB SQL
 
-- **CSV / JSON / Parquet** all auto-registered as views: `event.json` → view `event`, `data.csv` → view `data`. JSON `{"records":[...]}` and JSON-list shapes both work — no Python loading needed.
+- **CSV and JSON** auto-registered as views: `event.json` → view `event`, `data.csv` → view `data`. JSON `{"records":[...]}` and JSON-list shapes both work — no Python loading needed.
+- **Parquet**: read via `SELECT * FROM read_parquet('file.parquet')` (not auto-registered).
 - **SQLite `.db`** auto-attached: tables available by name (e.g. `database.db` with table `superhero` → just `SELECT * FROM superhero`).
 - **Cross-source JOINs** work natively (e.g. CSV view + JSON view + SQLite table in one query).
 - Dates: `strftime('%Y-%m', date_col)` for grouping.
