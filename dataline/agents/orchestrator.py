@@ -146,6 +146,15 @@ def run_task(
                 _log(trace, "domain_rules",
                      f"Compiled: {len(domain_rules_raw)} → {len(domain_rules)} chars")
 
+            # Promote metric definitions to a structured top-of-doc index.
+            # Helps small models locate formulas without scanning long prose.
+            from .metric_matcher import build_metric_index
+            metric_index = build_metric_index(domain_rules_raw)
+            if metric_index:
+                domain_rules = metric_index + "\n\n---\n\n" + domain_rules
+                _log(trace, "domain_rules",
+                     f"Promoted {metric_index.count(chr(10) + '- ')} metric definitions to index")
+
         workspace.write_domain_rules(domain_rules)
 
         obs["analyzer"] = {
