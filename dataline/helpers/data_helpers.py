@@ -336,6 +336,85 @@ def clean_numeric(series: pd.Series) -> pd.Series:
     return pd.to_numeric(cleaned, errors="coerce")
 
 
+# --- Multimodal readers (Phase 2 ready) ---
+
+
+def safe_read_text(filename: str, task_dir: str | None = None) -> str:
+    """Read any plain-text file (markdown, txt, log) into a string.
+
+    Use this for narrative markdown / docs whose content the agent needs to
+    parse with regex or string ops. Returns the full text.
+    """
+    path = _resolve_path(filename, task_dir)
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def safe_read_pdf(filename: str, task_dir: str | None = None) -> str:
+    """Extract all text from a PDF using pdfplumber.
+
+    Returns concatenated text across pages, separated by '\\n\\n--- page N ---\\n\\n'.
+    Empty pages contribute nothing. Use re or string ops on the result to
+    extract structured fields.
+    """
+    path = _resolve_path(filename, task_dir)
+    try:
+        import pdfplumber
+    except ImportError:
+        raise ImportError("pdfplumber required for safe_read_pdf — install via pip")
+
+    parts: list[str] = []
+    with pdfplumber.open(path) as pdf:
+        for i, page in enumerate(pdf.pages):
+            text = page.extract_text() or ""
+            if text.strip():
+                parts.append(f"--- page {i + 1} ---\n{text}")
+    return "\n\n".join(parts)
+
+
+def safe_read_docx(filename: str, task_dir: str | None = None) -> str:
+    """Extract paragraph text from a .docx file using python-docx.
+
+    Returns paragraphs joined by newlines. Tables are appended after
+    paragraphs as tab-separated rows for downstream parsing.
+    """
+    path = _resolve_path(filename, task_dir)
+    try:
+        from docx import Document
+    except ImportError:
+        raise ImportError("python-docx required for safe_read_docx — install via pip")
+
+    doc = Document(path)
+    parts: list[str] = []
+    for p in doc.paragraphs:
+        if p.text.strip():
+            parts.append(p.text)
+    for table in doc.tables:
+        for row in table.rows:
+            cells = [c.text.strip() for c in row.cells]
+            parts.append("\t".join(cells))
+    return "\n".join(parts)
+
+
+def safe_read_image(filename: str, task_dir: str | None = None) -> dict:
+    """Probe an image file: returns size/mode/format metadata.
+
+    Returns {'width', 'height', 'mode', 'format', 'path'}. For OCR / vision,
+    use pytesseract or a vision model on the returned path. This helper is
+    metadata-only and never raises on visual content.
+    """
+    path = _resolve_path(filename, task_dir)
+    from PIL import Image
+    with Image.open(path) as img:
+        return {
+            "path": path,
+            "width": img.size[0],
+            "height": img.size[1],
+            "mode": img.mode,
+            "format": img.format,
+        }
+
+
 # --- Quick exploration probes ---
 
 

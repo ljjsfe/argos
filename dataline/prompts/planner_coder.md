@@ -41,7 +41,8 @@ Schema reminders:
 - **TASK_DIR** / **TEMP_DIR**: env vars available if needed
 - **Libraries**: pandas, numpy, duckdb, json, re, os, pickle, collections, math
 - **Helpers** (`from data_helpers import *`):
-  - **I/O**: `safe_read_csv(filename)`, `safe_read_json_df(filename)` (auto-unwraps `{"records":[...]}`), `safe_read_excel(filename)`
+  - **I/O (structured)**: `safe_read_csv`, `safe_read_json_df` (auto-unwraps `{"records":[...]}`), `safe_read_excel`
+  - **I/O (documents/multimodal)**: `safe_read_text(path)` → string (markdown/txt), `safe_read_pdf(path)` → string (text per page), `safe_read_docx(path)` → string (paragraphs+tables), `safe_read_image(path)` → `{width, height, mode, format, path}` metadata dict
   - **Probe** (cheap data-verification — print results to trace):
     - `describe_df(df)` → compact dtypes/nunique/sample summary, more useful than `df.info()`
     - `count_distinct(df, col)` → `{rows, distinct, ratio}`; ratio≈1 means PK, ratio≪1 means many duplicates per value
