@@ -55,6 +55,13 @@ def main():
         help="Sampling mode: 'dev' (fixed harder-biased 10-task set), 'full' (all), or integer N (random N tasks)",
     )
     batch_parser.add_argument(
+        "--vote-policy",
+        choices=["off", "adaptive"],
+        default="off",
+        help="Voting policy: 'off' (single run, default) or 'adaptive' "
+             "(complexity- and uncertainty-gated N=3 majority voting)",
+    )
+    batch_parser.add_argument(
         "--parallel",
         type=int,
         default=None,
@@ -288,6 +295,8 @@ def _batch_kdd(args, config, run_task, save_prediction, create_client_from_confi
 
     os.makedirs(args.output, exist_ok=True)
 
+    vote_policy = getattr(args, "vote_policy", "off")
+
     def _run_single_kdd(task_id: str) -> tuple[str, object]:
         task_dir = os.path.join(input_dir, task_id)
         task_json = os.path.join(task_dir, "task.json")
@@ -303,19 +312,38 @@ def _batch_kdd(args, config, run_task, save_prediction, create_client_from_confi
         out_dir = os.path.join(args.output, task_id)
         os.makedirs(out_dir, exist_ok=True)
 
-        llm = create_client_from_config(config)
-        result = run_task(
-            task_dir=task_dir, question=question, llm=llm, config=config,
-            task_id=task_id, output_dir=out_dir, benchmark="kdd",
-            session_id=session_id,
-        )
+        def _one_run():
+            llm = create_client_from_config(config)
+            return run_task(
+                task_dir=task_dir, question=question, llm=llm, config=config,
+                task_id=task_id, output_dir=out_dir, benchmark="kdd",
+                session_id=session_id,
+            )
+
+        diff = task_data.get("difficulty", "?")
+
+        if vote_policy == "adaptive":
+            from dataline.voting import adaptive_run
+            from dataline.profiler.manifest import scan
+            manifest = scan(task_dir)
+            result, all_runs, trigger = adaptive_run(_one_run, manifest)
+            n = len(all_runs)
+            total_tokens = sum(r.total_tokens for r in all_runs)
+            total_cost = sum(r.total_cost_usd for r in all_runs)
+            total_time = sum(r.time_seconds for r in all_runs)
+            vote_tag = f" vote={n}({trigger.split('_')[0]})" if n > 1 else ""
+        else:
+            result = _one_run()
+            total_tokens = result.total_tokens
+            total_cost = result.total_cost_usd
+            total_time = result.time_seconds
+            vote_tag = ""
 
         save_prediction(result.answer, os.path.join(out_dir, "prediction.csv"))
         _save_trace(result, os.path.join(out_dir, "trace.json"))
 
         status = "OK" if result.success else "FAIL"
-        diff = task_data.get("difficulty", "?")
-        print(f"  [{task_id}] ({diff}) → {status} | {result.total_tokens:,} tok | ${result.total_cost_usd:.3f} | {result.time_seconds:.1f}s")
+        print(f"  [{task_id}] ({diff}) → {status}{vote_tag} | {total_tokens:,} tok | ${total_cost:.3f} | {total_time:.1f}s")
         return task_id, result
 
     if parallel <= 1:
