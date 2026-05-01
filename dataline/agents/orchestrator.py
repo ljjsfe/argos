@@ -37,6 +37,7 @@ from ..core.state import (
     truncate_to_step,
     update_harness_feedback,
     update_judge_guidance,
+    update_repl_state_summary,
 )
 from ..core.tracer import TaskTracer
 from ..core.tracing_llm import TracingLLMClient
@@ -222,6 +223,19 @@ def run_task(
             tracer.set_iteration(iteration, max_iterations)
             _log(trace, "iteration", f"--- Iteration {iteration} ---")
             iter_obs: dict[str, Any] = {"iteration": iteration}
+
+            # ── Refresh REPL state summary (only when REPL is active) ──
+            # Lists variables alive from prior iterations so PlannerCoder
+            # context can show "Available REPL State" and prompt the agent
+            # to reuse rather than re-load.
+            if stateful_repl is not None and iteration > 0:
+                try:
+                    var_dict = stateful_repl.list_vars()
+                    if var_dict:
+                        summary = "\n".join(f"- `{k}`: {v}" for k, v in var_dict.items())
+                        state = update_repl_state_summary(state, summary)
+                except Exception:
+                    pass  # introspection should never break the loop
 
             # ── PlannerCoder: plan + generate code candidates ──
             with tracer.span("planner_coder", metadata={"iteration": iteration}):

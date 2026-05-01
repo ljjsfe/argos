@@ -164,6 +164,42 @@ class StatefulPythonExec:
             execution_time_ms=elapsed_ms,
         )
 
+    def list_vars(self, max_repr: int = 80) -> dict[str, str]:
+        """Return user-defined globals: {name: "type — repr"}.
+
+        Filters out modules, builtins, dunders, callables. The result is
+        meant for prompt injection so the agent knows what state is alive
+        from prior iterations and can REUSE it instead of re-loading.
+        """
+        import types as _types
+
+        result: dict[str, str] = {}
+        for name, val in self.globals_.items():
+            if name.startswith("_") or name == "__builtins__":
+                continue
+            if isinstance(val, _types.ModuleType):
+                continue
+            if callable(val) and not isinstance(val, (list, dict, tuple)):
+                continue
+            type_name = type(val).__name__
+            try:
+                if hasattr(val, "shape"):  # DataFrame, ndarray
+                    repr_ = f"shape={getattr(val, 'shape')}"
+                elif hasattr(val, "__len__"):
+                    n = len(val)
+                    if n > 0 and isinstance(val, (str, bytes)):
+                        sample = repr(val[:60])[:max_repr]
+                        repr_ = f"len={n}, sample={sample}"
+                    else:
+                        repr_ = f"len={n}"
+                else:
+                    s = repr(val)
+                    repr_ = s[:max_repr] + ("…" if len(s) > max_repr else "")
+            except Exception:
+                repr_ = "(unrepr-able)"
+            result[name] = f"{type_name} — {repr_}"
+        return result
+
     def cleanup(self) -> None:
         if self._closed:
             return

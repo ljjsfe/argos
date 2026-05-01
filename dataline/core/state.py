@@ -232,6 +232,11 @@ def update_judge_guidance(state: AnalysisState, guidance: str) -> AnalysisState:
     return replace(state, judge_guidance=separator.join(records))
 
 
+def update_repl_state_summary(state: AnalysisState, summary: str) -> AnalysisState:
+    """Set the REPL globals summary for next PlannerCoder invocation."""
+    return replace(state, repl_state_summary=summary)
+
+
 def update_harness_feedback(state: AnalysisState, feedback: str) -> AnalysisState:
     """Return new state with updated harness feedback."""
     return replace(state, harness_feedback=feedback)

@@ -191,6 +191,7 @@ class AnalysisState:
     variables_in_scope: tuple[tuple[str, str], ...] = ()  # (pickle_name, description)
     judge_guidance: str = ""                        # steering instruction from judge for next iteration
     harness_feedback: str = ""                       # deterministic block/warn messages from HarnessGate
+    repl_state_summary: str = ""                     # active REPL globals from prior iteration (var → type+repr)
     task_mode: str = ""                              # deterministic routing hint (single_sql, multi_sql, python_extract, etc.)
     completed_steps: tuple[str, ...] = ()           # 1-line per step
     full_step_details: tuple[StepRecord, ...] = ()  # raw data for Finalizer + Judge

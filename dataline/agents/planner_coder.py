@@ -169,6 +169,23 @@ def _build_context_managed_prompt(
             heading="",
         ))
 
+    # Available REPL state — variables/data alive from prior iterations
+    # of THIS task. When non-empty, agent should reference these names
+    # rather than re-loading the same files / re-running parses.
+    if state.repl_state_summary:
+        sections.append(Section(
+            name="repl_state",
+            content=(
+                f"## Available REPL State (from prior iterations — REUSE these)\n"
+                f"{state.repl_state_summary}\n"
+                f"\nDo NOT re-load or re-parse data already present above. "
+                f"Reference variables by name and build incrementally."
+            ),
+            priority=91,
+            compressible=False,
+            heading="",
+        ))
+
     # Task mode hint — deterministic routing
     if state.task_mode:
         hint = _TASK_MODE_HINTS.get(state.task_mode, "")
