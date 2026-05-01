@@ -13,47 +13,11 @@ from __future__ import annotations
 import json
 import os
 import re
-import threading
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
-
-
-# --- Thread-local task context (parallel-safe override of env vars) ---
-# When in-process execution mode is used (StatefulPythonExec) with parallel
-# task workers, os.environ becomes a contention point — last-thread-wins
-# overwrites TASK_DIR / TEMP_DIR for every other in-flight task. Threading
-# .local() gives each worker its own context; helpers prefer it over env.
-
-_context = threading.local()
-
-
-def set_task_context(task_dir: str, temp_dir: str) -> None:
-    """Bind task_dir / temp_dir for the current thread.
-
-    Helpers (save_result, _resolve_path) prefer this over os.environ.
-    Subprocess execution does not need to call this — env vars work
-    naturally with process-isolated subprocesses.
-    """
-    _context.task_dir = os.path.abspath(task_dir) if task_dir else None
-    _context.temp_dir = os.path.abspath(temp_dir) if temp_dir else None
-
-
-def clear_task_context() -> None:
-    """Drop the current thread's task context."""
-    for attr in ("task_dir", "temp_dir"):
-        if hasattr(_context, attr):
-            delattr(_context, attr)
-
-
-def _ctx_task_dir() -> str | None:
-    return getattr(_context, "task_dir", None)
-
-
-def _ctx_temp_dir() -> str | None:
-    return getattr(_context, "temp_dir", None)
 
 
 # --- File loading ---
@@ -524,7 +488,7 @@ def save_intermediate(data: Any, name: str, temp_dir: str | None = None) -> str:
     """
     import pickle
 
-    td = temp_dir or _ctx_temp_dir() or os.environ.get("TEMP_DIR", ".")
+    td = temp_dir or os.environ.get("TEMP_DIR", ".")
     if not name.endswith(".pkl"):
         name = f"{name}.pkl"
     path = os.path.join(td, name)
@@ -545,7 +509,7 @@ def load_intermediate(name: str, temp_dir: str | None = None) -> Any:
     """
     import pickle
 
-    td = temp_dir or _ctx_temp_dir() or os.environ.get("TEMP_DIR", ".")
+    td = temp_dir or os.environ.get("TEMP_DIR", ".")
     if not name.endswith(".pkl"):
         name = f"{name}.pkl"
     path = os.path.join(td, name)
@@ -581,7 +545,7 @@ def save_result(
     Returns:
         Absolute path to the written file.
     """
-    td = temp_dir or _ctx_temp_dir() or os.environ.get("TEMP_DIR", ".")
+    td = temp_dir or os.environ.get("TEMP_DIR", ".")
     path = os.path.join(td, "step_result.json")
 
     answer = _normalize_answer(answer)
@@ -674,7 +638,7 @@ def _resolve_path(filename: str, task_dir: str | None = None) -> str:
     """
     if os.path.isabs(filename):
         return filename
-    td = task_dir or _ctx_task_dir() or os.environ.get("TASK_DIR", ".")
+    td = task_dir or os.environ.get("TASK_DIR", ".")
 
     # Direct path first
     direct = os.path.join(td, filename)

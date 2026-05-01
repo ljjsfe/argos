@@ -97,30 +97,11 @@ def run_task(
     tracer = TaskTracer(task_id, output_dir, session_id=session_id)
     traced_llm = TracingLLMClient(llm, tracer)
 
-    # Optional in-process Python REPL with persistent globals across iterations.
-    # Variables, imports, and parsed data from iteration N stay alive in N+1, so
-    # the agent can build cumulative state instead of restarting per retry.
-    # Uses thread-local task context (parallel-safe).
-    stateful_repl = None
-    if config.get("sandbox", {}).get("stateful_python", True):
-        from ..core.stateful_python import StatefulPythonExec
-        stateful_repl = None  # constructed below once we know temp_dir
-
     sandbox = Sandbox(
         task_dir=task_dir,
         timeout=config.get("sandbox", {}).get("timeout_seconds", 120),
         max_memory_mb=config.get("sandbox", {}).get("max_memory_mb", 1024),
     )
-
-    if config.get("sandbox", {}).get("stateful_python", True):
-        from ..core.stateful_python import StatefulPythonExec
-        stateful_repl = StatefulPythonExec(
-            task_dir=task_dir,
-            temp_dir=sandbox.temp_dir,
-            timeout=config.get("sandbox", {}).get("timeout_seconds", 120),
-        )
-        # Inject after Sandbox init so temp_dir is the real one.
-        sandbox._stateful_repl = stateful_repl
 
     # Workspace: file-based state, persisted to output_dir/workspace/
     workspace = Workspace(temp_dir=sandbox.temp_dir, output_dir=output_dir)
@@ -638,9 +619,6 @@ def run_task(
         tracer.set_observations(obs)
         tracer.finish(success=True)
 
-        if stateful_repl is not None:
-            stateful_repl.cleanup()
-
         return TaskResult(
             task_id=task_id,
             question=question,
@@ -661,8 +639,6 @@ def run_task(
         workspace.persist()
         tracer.set_observations(obs)
         tracer.finish(success=False, error=str(e))
-        if stateful_repl is not None:
-            stateful_repl.cleanup()
         return TaskResult(
             task_id=task_id,
             question=question,
