@@ -108,23 +108,6 @@ class StatefulPythonExec:
             )
 
         self._call_count += 1
-
-        # Runtime state probe: prepend a print so agent's stdout shows what's
-        # alive from prior iterations. Reinforces the prompt's "REUSE state"
-        # message at the moment agent reads execution output.
-        if self._call_count > 1:
-            probe_code = (
-                "# === Persisted REPL state (auto-probe) ===\n"
-                "_alive = {k: type(v).__name__ for k, v in list(globals().items())\n"
-                "         if not k.startswith('_') and not callable(v)\n"
-                "         and not type(v).__name__ == 'module'}\n"
-                "if _alive:\n"
-                "    print(f'[REPL] {len(_alive)} alive vars from prior iter: ' + str(list(_alive.items())[:8]))\n"
-                "del _alive\n"
-                "# ===========================================\n"
-            )
-            code = probe_code + code
-
         start = time.time()
         out_buf = io.StringIO()
         err_buf = io.StringIO()
@@ -184,12 +167,9 @@ class StatefulPythonExec:
     def list_vars(self, max_repr: int = 80) -> dict[str, str]:
         """Return user-defined globals: {name: "type — repr"}.
 
-        Filters out builtins, dunders, callables. The result is meant for
-        prompt injection so the agent knows what state is alive from prior
-        iterations and can REUSE it instead of re-loading.
-
-        Modules are included with a special marker so the agent knows what
-        is already imported and doesn't waste tokens re-importing.
+        Filters out modules, builtins, dunders, callables. The result is
+        meant for prompt injection so the agent knows what state is alive
+        from prior iterations and can REUSE it instead of re-loading.
         """
         import types as _types
 
@@ -197,23 +177,11 @@ class StatefulPythonExec:
         for name, val in self.globals_.items():
             if name.startswith("_") or name == "__builtins__":
                 continue
-            type_name = type(val).__name__
             if isinstance(val, _types.ModuleType):
-                result[name] = f"module — already imported (skip re-import)"
                 continue
             if callable(val) and not isinstance(val, (list, dict, tuple)):
-                # Agent-defined functions are useful state too; skip our
-                # own helpers via name pattern
-                if name in ("safe_read_csv", "safe_read_json", "safe_read_json_df",
-                            "safe_read_excel", "safe_read_text", "safe_read_pdf",
-                            "safe_read_docx", "safe_read_image", "save_result",
-                            "describe_df", "describe_data", "find_join_keys",
-                            "detect_date_columns", "clean_numeric",
-                            "save_intermediate", "load_intermediate",
-                            "count_distinct", "value_overlap", "assume_then"):
-                    continue
-                result[name] = f"function — defined in prior iteration"
                 continue
+            type_name = type(val).__name__
             try:
                 if hasattr(val, "shape"):  # DataFrame, ndarray
                     repr_ = f"shape={getattr(val, 'shape')}"
