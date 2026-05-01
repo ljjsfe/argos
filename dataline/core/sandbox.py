@@ -145,26 +145,19 @@ save_result(answer=result, row_counts={"result_rows": len(next(iter(result.value
 
 
 class Sandbox:
-    """Execute code in isolated subprocess with persistent temp directory.
-
-    Optionally accepts a StatefulPythonExec instance for in-process Python
-    execution that persists variables across iterations of one task. When
-    provided, Python code uses the REPL; SQL still wraps in subprocess.
-    """
+    """Execute code in isolated subprocess with persistent temp directory."""
 
     def __init__(
         self,
         task_dir: str,
         timeout: int = 120,
         max_memory_mb: int = 1024,
-        stateful_repl: object | None = None,
     ):
         self._task_dir = os.path.abspath(task_dir)
         self._timeout = timeout
         self._max_memory_mb = max_memory_mb
         self._temp_dir = tempfile.mkdtemp(prefix="dataline_")
         self._step_count = 0
-        self._stateful_repl = stateful_repl
         self._install_helpers()
 
     @property
@@ -207,14 +200,6 @@ class Sandbox:
             run_dir = self._build_scratch()
         else:
             run_dir = self._temp_dir
-
-        # Stateful REPL path: in-process Python with persistent globals.
-        # Skip subprocess entirely — variables/imports from prior steps
-        # are still alive in self._stateful_repl.globals_.
-        # Only used for Python (not SQL — SQL still goes through subprocess
-        # so DuckDB connection is fresh per query, avoiding stale views).
-        if self._stateful_repl is not None and language == "python":
-            return self._execute_via_repl(code, step_id, run_dir)
 
         # Write code to temp file (in TEMP_DIR, not scratch — keeps scratch clean)
         code_path = Path(self._temp_dir) / f"{step_id}.py"
@@ -269,34 +254,6 @@ class Sandbox:
             # Clean up scratch dir (symlinks only, no real data deleted)
             if use_scratch and os.path.exists(run_dir) and run_dir != self._temp_dir:
                 shutil.rmtree(run_dir, ignore_errors=True)
-
-    def _execute_via_repl(self, code: str, step_id: str, run_dir: str) -> SandboxResult:
-        """Run Python in the persistent in-process REPL.
-
-        Switches cwd to run_dir before exec so relative file paths in agent
-        code resolve to symlinks just like the subprocess path. Restores
-        cwd afterward.
-        """
-        prev_cwd = os.getcwd()
-        try:
-            if os.path.isdir(run_dir):
-                os.chdir(run_dir)
-            r = self._stateful_repl.execute(code)
-        finally:
-            try:
-                os.chdir(prev_cwd)
-            except OSError:
-                pass
-
-        # REPL state may have written step_result.json via save_result helper
-        return SandboxResult(
-            stdout=r.stdout,
-            stderr=r.stderr,
-            return_code=r.return_code,
-            execution_time_ms=r.execution_time_ms,
-            step_id=step_id,
-            structured_json=self._read_step_result(),
-        )
 
     def _wrap_sql(self, sql: str) -> str:
         """Wrap raw SQL in a DuckDB runner script.
