@@ -272,7 +272,11 @@ def _batch_kdd(args, config, run_task, save_prediction, create_client_from_confi
 
     Supports parallel execution via args.parallel (resolved from config or CLI).
     """
-    input_dir = os.path.join(args.data, "input")
+    # Force absolute paths upfront — defends against chdir-induced races
+    # if any worker (e.g. in-process REPL) modifies process cwd.
+    input_dir = os.path.abspath(os.path.join(args.data, "input"))
+    output_root = os.path.abspath(args.output)
+
     if args.tasks:
         task_ids = args.tasks
     else:
@@ -286,7 +290,7 @@ def _batch_kdd(args, config, run_task, save_prediction, create_client_from_confi
     print(f"[KDD] Parallelism: {parallel}")
     print()
 
-    os.makedirs(args.output, exist_ok=True)
+    os.makedirs(output_root, exist_ok=True)
 
     def _run_single_kdd(task_id: str) -> tuple[str, object]:
         task_dir = os.path.join(input_dir, task_id)
@@ -300,7 +304,7 @@ def _batch_kdd(args, config, run_task, save_prediction, create_client_from_confi
             task_data = json.load(f)
             question = task_data.get("question", "")
 
-        out_dir = os.path.join(args.output, task_id)
+        out_dir = os.path.join(output_root, task_id)
         os.makedirs(out_dir, exist_ok=True)
 
         llm = create_client_from_config(config)
