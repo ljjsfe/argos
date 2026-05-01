@@ -28,8 +28,9 @@ Schema reminders:
 
 ### Step 3 — Write the query
 
-- **Solve in ONE step.** Multi-step plans have much lower success rates.
+- **Solve in ONE step when possible.** A clean single-step solution beats a multi-step chain.
 - **SQL first**: Use DuckDB SQL for structured data (CSV, JSON, SQLite). Only use Python when SQL genuinely cannot express the logic (unstructured data, multi-step with prior results).
+- **Python iterations share state**: variables, imports, and parsed data from prior iterations of the SAME task remain alive in the next iteration. So a heavy operation (read a 100KB markdown, parse a PDF, build a regex pattern set) can be done once in iteration N and reused in N+1 by referring to the same variable name. Do NOT re-read or re-parse data the previous iteration already loaded.
 - **Min/max/lowest/highest**: NEVER use `LIMIT 1` — ties exist. Use `WHERE col = (SELECT MIN(col) FROM t)` or `RANK() OVER (...) = 1`.
 - **Percentages**: `COUNT(CASE WHEN cond THEN 1 END) * 100.0 / COUNT(*)` — multiply first to avoid integer division.
 - **Return ONLY columns the question asks for** — extra columns reduce score.

@@ -97,11 +97,30 @@ def run_task(
     tracer = TaskTracer(task_id, output_dir, session_id=session_id)
     traced_llm = TracingLLMClient(llm, tracer)
 
+    # Optional stateful Python REPL for multi-step iteration. Variables
+    # imported / parsed in iteration N stay alive in iteration N+1, so the
+    # agent can build cumulative state (read large doc once → probe →
+    # extract → answer) instead of restarting from scratch each retry.
+    stateful_repl = None
+    if config.get("sandbox", {}).get("stateful_python", True):
+        from ..core.stateful_python import StatefulPythonExec
+        stateful_repl = StatefulPythonExec(
+            task_dir=task_dir,
+            temp_dir="",  # set below after sandbox creates its temp_dir
+            timeout=config.get("sandbox", {}).get("timeout_seconds", 120),
+        )
+
     sandbox = Sandbox(
         task_dir=task_dir,
         timeout=config.get("sandbox", {}).get("timeout_seconds", 120),
         max_memory_mb=config.get("sandbox", {}).get("max_memory_mb", 1024),
+        stateful_repl=stateful_repl,
     )
+
+    # Wire REPL temp_dir to match sandbox (helpers and step_result.json land here)
+    if stateful_repl is not None:
+        stateful_repl._temp_dir = sandbox.temp_dir
+        stateful_repl._init_environment()
 
     # Workspace: file-based state, persisted to output_dir/workspace/
     workspace = Workspace(temp_dir=sandbox.temp_dir, output_dir=output_dir)
@@ -619,6 +638,9 @@ def run_task(
         tracer.set_observations(obs)
         tracer.finish(success=True)
 
+        if stateful_repl is not None:
+            stateful_repl.cleanup()
+
         return TaskResult(
             task_id=task_id,
             question=question,
@@ -639,6 +661,8 @@ def run_task(
         workspace.persist()
         tracer.set_observations(obs)
         tracer.finish(success=False, error=str(e))
+        if stateful_repl is not None:
+            stateful_repl.cleanup()
         return TaskResult(
             task_id=task_id,
             question=question,
