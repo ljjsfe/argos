@@ -79,7 +79,9 @@ _TOP_N_PATTERN = r"\b(?:top|bottom)\s+(\d+)\b"
 # Grouping patterns — "for each", "per", "by"
 _GROUP_PATTERNS = [
     r"\bfor\s+each\b",
-    r"\bper\s+\w+\b",
+    # "per X" — but skip "per unit" / "per year" etc when in a filter clause
+    # ("paid more than X per unit") rather than output grouping ("X per region").
+    r"\bper\s+(?!unit\b)(?!year\b)(?!month\b)(?!day\b)(?!hour\b)\w+\b",
     r"\bgroup(?:ed)?\s+by\b",
 ]
 
@@ -238,6 +240,21 @@ def analyze_deterministic(question: str) -> QuestionSpec:
             computation_type="lookup",
         )
 
+    # ── "Give/Provide their X status" — single-attribute lookup mid-sentence
+    # Catches questions like task_180 where the verb appears after a filter clause:
+    # "For all people who paid more than X. Give their consumption status."
+    # Falls through here when no other pattern matches; uses _estimate_column_count
+    # (which now handles "List/Give/..." patterns) to detect 1-col output.
+    col_count_estimate = _estimate_column_count(q)
+    if col_count_estimate == 1:
+        return QuestionSpec(
+            answer_type="list",
+            expected_column_count=1,
+            expected_row_count="multiple",
+            value_style="unknown",
+            computation_type="lookup",
+        )
+
     return _UNKNOWN_SPEC
 
 
@@ -299,6 +316,18 @@ def _estimate_column_count(question: str) -> int:
     # This handles task_86 ("Which race was Alex Yoong in...") and task_25
     # ("Which event has the lowest cost?") where the answer is entity name only.
     if not output_and and re.search(r"^\s*which\s+\w+", q, re.IGNORECASE):
+        return 1
+
+    # "List/Give/Identify/State the X" without "and" in output context
+    # → single attribute output. Captures task_38 ("List all the withdrawals")
+    # and task_180 ("Give their consumption status") where gold returns 1 col.
+    # Allows the verb to appear mid-sentence (after a leading filter clause).
+    # Skip if the trailing phrase mentions "and" near a noun (multi-col intent).
+    if not output_and and re.search(
+        r"\b(?:list|give|identify|state|provide)\s+"
+        r"(?:all\s+|the\s+|their\s+|out\s+)*(?:\w+\s+){0,3}(?:of|in|with|that|when|for|whose|whom|where|to|on|by|status|name|id|date|count|cost|amount|value|type|total)\b",
+        q, re.IGNORECASE,
+    ):
         return 1
 
     return 0
