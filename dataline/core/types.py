@@ -193,6 +193,8 @@ class AnalysisState:
     harness_feedback: str = ""                       # deterministic block/warn messages from HarnessGate
     repl_state_summary: str = ""                     # active REPL globals from prior iteration (var → type+repr)
     task_mode: str = ""                              # deterministic routing hint (single_sql, multi_sql, python_extract, etc.)
+    playbook_hints: str = ""                         # curated patterns retrieved at task start (advisory)
+    playbook_entry_ids: tuple[str, ...] = ()         # ids of retrieved entries — for telemetry tracking
     completed_steps: tuple[str, ...] = ()           # 1-line per step
     full_step_details: tuple[StepRecord, ...] = ()  # raw data for Finalizer + Judge
 

@@ -50,6 +50,15 @@ def set_task_mode(state: AnalysisState, task_mode: str) -> AnalysisState:
     return replace(state, task_mode=task_mode)
 
 
+def set_playbook_hints(
+    state: AnalysisState,
+    hints: str,
+    entry_ids: tuple[str, ...] = (),
+) -> AnalysisState:
+    """Return new state with playbook hints + retrieved entry ids attached."""
+    return replace(state, playbook_hints=hints, playbook_entry_ids=entry_ids)
+
+
 def compress_manifest(manifest: Manifest) -> str:
     """Compress manifest to rich schema context.
 

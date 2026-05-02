@@ -198,6 +198,20 @@ def _build_context_managed_prompt(
                 heading="",
             ))
 
+    # Playbook hints — curated patterns retrieved by keyword overlap.
+    # ADVISORY: agent may follow or override based on the actual data.
+    if state.playbook_hints:
+        sections.append(Section(
+            name="playbook",
+            content=(
+                f"## Playbook (curated patterns from prior tasks — advisory)\n"
+                f"{state.playbook_hints}"
+            ),
+            priority=88,
+            compressible=False,
+            heading="",
+        ))
+
     # Data manifest (rich schema with DISTINCT values, sample rows)
     sections.append(Section(
         name="manifest",

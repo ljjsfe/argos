@@ -1,0 +1,14 @@
+# Playbook: curated data-analysis patterns.
+#
+# Entries are human-authored. Each entry has:
+#   id          — stable identifier (prefix pb_ + 3-digit number)
+#   type        — "strategy" | "recovery" | "optimization"
+#   trigger     — observable condition (from question text + schema)
+#   action      — concrete agent behavior (refers to helpers / SQL / patterns)
+#   evidence    — list of trace task_ids that motivated this entry
+#   added_date  — YYYY-MM-DD when written
+#
+# Runtime telemetry (use_count, win_count) is tracked separately in
+# playbook_telemetry.json. Do NOT edit telemetry by hand.
+
+entries: []

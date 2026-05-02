@@ -31,6 +31,7 @@ from ..core.sandbox import Sandbox
 from ..core.state import (
     add_step,
     create_initial_state,
+    set_playbook_hints,
     set_question_analysis,
     set_task_mode,
     summarize_step_output,
@@ -53,6 +54,12 @@ from ..core.workspace import Workspace
 from ..profiler import manifest as profiler
 from ..profiler.manifest import manifest_to_json
 from . import analyzer, debugger, finalizer, harness_gate, judge as judge_agent
+from ..playbook import (
+    format_for_prompt as _playbook_format,
+    load_entries as _playbook_load,
+    record_use as _playbook_record_use,
+    retrieve_relevant as _playbook_retrieve,
+)
 from .question_analyzer import analyze_deterministic
 from .planner_coder import generate as planner_coder_generate, PlannerCoderOutput
 from .code_validator import validate_column_references
@@ -202,6 +209,26 @@ def run_task(
         state = set_task_mode(state, task_mode)
         _log(trace, "task_router", f"Task mode: {task_mode}")
         obs["task_mode"] = task_mode
+
+        # ─── Stage 3d: Playbook retrieval (curated patterns, zero LLM) ───
+        # Fail-soft: missing/empty playbook → no hints, no behavior change.
+        try:
+            _pb_entries = _playbook_load()
+            _pb_top = _playbook_retrieve(
+                _pb_entries, question, schema_hint=state.manifest_summary, k=5,
+            )
+            _pb_hints = _playbook_format(_pb_top)
+            _pb_ids = tuple(e.id for e in _pb_top)
+            if _pb_hints:
+                state = set_playbook_hints(state, _pb_hints, _pb_ids)
+                _log(trace, "playbook",
+                     f"Retrieved {len(_pb_top)} entries: {list(_pb_ids)}")
+                obs["playbook_retrieved"] = list(_pb_ids)
+            else:
+                obs["playbook_retrieved"] = []
+        except Exception as e:
+            _log(trace, "playbook", f"retrieval failed (fail-soft): {e}")
+            obs["playbook_retrieved"] = []
 
         # Track execution state
         steps_done: list[StepRecord] = []
@@ -640,6 +667,14 @@ def run_task(
             "execution_path": execution_path,
             "languages_used": sorted({i.get("winning_language", i.get("language", "?")) for i in obs["iterations"]}),
         }
+
+        # Record playbook use (use_count only — win_count needs gold and is
+        # set by the eval scorer when it runs, not at task completion time).
+        if state.playbook_entry_ids:
+            try:
+                _playbook_record_use(state.playbook_entry_ids, won=False)
+            except Exception:  # fail-soft: telemetry never breaks the agent
+                pass
         _log(trace, "summary",
              f"Completed in {len(obs['iterations'])} iterations | "
              f"Path: {' → '.join(execution_path)}")
