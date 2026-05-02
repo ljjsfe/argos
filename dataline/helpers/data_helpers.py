@@ -381,12 +381,25 @@ def safe_read_text(filename: str, task_dir: str | None = None) -> str:
         return f.read()
 
 
-def safe_read_pdf(filename: str, task_dir: str | None = None) -> str:
-    """Extract all text from a PDF using pdfplumber.
+def safe_read_pdf(
+    filename: str,
+    task_dir: str | None = None,
+    *,
+    ocr_fallback: bool = True,
+    ocr_lang: str = "eng",
+    ocr_min_chars_per_page: int = 30,
+) -> str:
+    """Extract text from a PDF.
 
-    Returns concatenated text across pages, separated by '\\n\\n--- page N ---\\n\\n'.
-    Empty pages contribute nothing. Use re or string ops on the result to
-    extract structured fields.
+    Strategy:
+      1. pdfplumber for embedded text (text-based PDFs).
+      2. If a page yields fewer than ocr_min_chars_per_page characters AND
+         ocr_fallback=True, rasterize the page via PyMuPDF (fitz) and run
+         pytesseract OCR on it. This catches scanned PDFs that have no text
+         layer.
+
+    Returns concatenated text across pages, separated by
+    '\\n\\n--- page N [source] ---\\n\\n' where [source] is 'text' or 'ocr'.
     """
     path = _resolve_path(filename, task_dir)
     try:
@@ -394,12 +407,44 @@ def safe_read_pdf(filename: str, task_dir: str | None = None) -> str:
     except ImportError:
         raise ImportError("pdfplumber required for safe_read_pdf — install via pip")
 
+    # Lazy: only import OCR deps if a sparse page is detected.
+    pytesseract = None
+    fitz = None
+    fitz_doc = None
+
     parts: list[str] = []
     with pdfplumber.open(path) as pdf:
         for i, page in enumerate(pdf.pages):
-            text = page.extract_text() or ""
-            if text.strip():
-                parts.append(f"--- page {i + 1} ---\n{text}")
+            text = (page.extract_text() or "").strip()
+            source = "text"
+
+            if ocr_fallback and len(text) < ocr_min_chars_per_page:
+                try:
+                    if pytesseract is None:
+                        import pytesseract as _pyt
+                        pytesseract = _pyt
+                    if fitz_doc is None:
+                        import fitz as _fitz
+                        fitz = _fitz
+                        fitz_doc = fitz.open(path)
+                    fz_page = fitz_doc.load_page(i)
+                    pix = fz_page.get_pixmap(dpi=200)
+                    from PIL import Image
+                    import io
+                    img = Image.open(io.BytesIO(pix.tobytes("png")))
+                    ocr_text = pytesseract.image_to_string(img, lang=ocr_lang).strip()
+                    if len(ocr_text) > len(text):
+                        text = ocr_text
+                        source = "ocr"
+                except Exception:
+                    pass  # fall back to whatever pdfplumber gave us
+
+            if text:
+                parts.append(f"--- page {i + 1} [{source}] ---\n{text}")
+
+    if fitz_doc is not None:
+        fitz_doc.close()
+
     return "\n\n".join(parts)
 
 
@@ -427,23 +472,51 @@ def safe_read_docx(filename: str, task_dir: str | None = None) -> str:
     return "\n".join(parts)
 
 
-def safe_read_image(filename: str, task_dir: str | None = None) -> dict:
-    """Probe an image file: returns size/mode/format metadata.
+def safe_read_image(
+    filename: str,
+    task_dir: str | None = None,
+    *,
+    ocr: bool = True,
+    ocr_lang: str = "eng",
+) -> dict:
+    """Read an image: metadata + (optional) OCR text.
 
-    Returns {'width', 'height', 'mode', 'format', 'path'}. For OCR / vision,
-    use pytesseract or a vision model on the returned path. This helper is
-    metadata-only and never raises on visual content.
+    Returns:
+        {'path', 'width', 'height', 'mode', 'format', 'text', 'ocr_engine'}.
+        'text' is the OCR-extracted string ('' when ocr=False or OCR failed).
+        'ocr_engine' is 'pytesseract' on success or '' otherwise.
+
+    OCR is lazy — pytesseract / tesseract binary are only required when ocr=True.
+    Set ocr=False to skip and only get metadata (useful for very large images
+    where the agent only needs to know dimensions).
     """
     path = _resolve_path(filename, task_dir)
     from PIL import Image
+
     with Image.open(path) as img:
-        return {
+        result: dict = {
             "path": path,
             "width": img.size[0],
             "height": img.size[1],
             "mode": img.mode,
             "format": img.format,
+            "text": "",
+            "ocr_engine": "",
         }
+
+        if not ocr:
+            return result
+
+        try:
+            import pytesseract
+            text = pytesseract.image_to_string(img, lang=ocr_lang)
+            result["text"] = text.strip()
+            result["ocr_engine"] = "pytesseract"
+        except (ImportError, Exception) as e:
+            # Fail-soft: metadata still useful; agent can decide what to do.
+            result["ocr_error"] = f"{type(e).__name__}: {e}"
+
+    return result
 
 
 # --- Quick exploration probes ---
