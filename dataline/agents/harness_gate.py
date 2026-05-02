@@ -440,6 +440,59 @@ def _check_empty_answer(
 _DICT_STRING_RE = re.compile(r"^\{.*\}$", re.DOTALL)
 
 
+_STDOUT_LEAK_MARKERS = (
+    "[step_result] saved",
+    "Result shape:",
+    "=== ",  # session-banner-style debug headers
+    "DataFrame:\n",
+    "shape: (",
+)
+
+
+def _check_stdout_leak(structured_json: str) -> list[HarnessFlag]:
+    """Reject answer values that are clearly stdout text, not real values.
+
+    Failure mode: agent calls ``save_result(answer={"col": [stdout_string]})``
+    where the string contains print artifacts ('[step_result] saved',
+    '=== Verification ===', shape banners, etc.). Scorer compares this
+    multi-line junk to a clean gold value and gives 0.
+
+    Detects when ANY value in the answer dict is a string that contains
+    a newline AND one of the known stdout-formatting markers.
+    """
+    if not structured_json:
+        return []
+    try:
+        data = json.loads(structured_json)
+        answer = data.get("answer", {})
+        if not isinstance(answer, dict):
+            return []
+    except (json.JSONDecodeError, ValueError):
+        return []
+
+    for col, vals in answer.items():
+        if not isinstance(vals, list):
+            continue
+        for v in vals:
+            if not isinstance(v, str):
+                continue
+            if "\n" not in v:
+                continue
+            if any(m in v for m in _STDOUT_LEAK_MARKERS):
+                return [HarnessFlag(
+                    rule="stdout_leak",
+                    severity="block",
+                    message=(
+                        f"Column '{col}' value contains captured stdout text "
+                        f"(matched marker in: {v[:80]!r}). "
+                        f"save_result() was called with print output as the "
+                        f"answer. Compute the actual scalar/list and pass "
+                        f"it directly, not the formatted log."
+                    ),
+                )]
+    return []
+
+
 def _check_dict_string_answer(structured_json: str) -> list[HarnessFlag]:
     """Rule 8b: detect save_result() called with a dict-as-string value.
 
@@ -1169,6 +1222,7 @@ def check(
     flags.extend(_check_extra_columns(structured_json))
     flags.extend(_check_empty_answer(question, structured_json))
     flags.extend(_check_dict_string_answer(structured_json))
+    flags.extend(_check_stdout_leak(structured_json))
     flags.extend(_check_nan_values(structured_json))
     flags.extend(_check_value_embellishment(structured_json))
     flags.extend(_check_error_string_answer(structured_json))

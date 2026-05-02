@@ -565,6 +565,211 @@ def value_overlap(
     }
 
 
+def safe_extract_tables(
+    filename: str,
+    task_dir: str | None = None,
+    *,
+    ocr_lang: str = "eng",
+    pages: list[int] | None = None,
+) -> list[pd.DataFrame]:
+    """Extract tables from a PDF or image file as DataFrames.
+
+    Uses img2table + tesseract under the hood. Lazy import so the
+    dependency is only required when this function is actually called.
+
+    Args:
+        filename: PDF or image (.png/.jpg/.jpeg).
+        pages: For PDF only — restrict to specific 1-indexed pages.
+               None = all pages.
+
+    Returns:
+        List of DataFrames (one per detected table). Empty list if no
+        tables found. The first column may be auto-detected as header by
+        img2table; verify shape with df.head() before relying on schema.
+
+    Fail-soft: if dependencies are missing or extraction errors out, returns
+    an empty list rather than raising — agent can fall back to OCR + regex.
+    """
+    path = _resolve_path(filename, task_dir)
+    try:
+        from img2table.ocr import TesseractOCR
+        from img2table.document import PDF, Image as Img2TableImage
+    except ImportError:
+        return []
+
+    try:
+        ocr_engine = TesseractOCR(lang=ocr_lang)
+        ext = os.path.splitext(path)[1].lower()
+        if ext == ".pdf":
+            doc = PDF(path, pages=pages) if pages else PDF(path)
+        else:
+            doc = Img2TableImage(path)
+        extracted = doc.extract_tables(ocr=ocr_engine, implicit_rows=True)
+    except Exception:
+        return []
+
+    out: list[pd.DataFrame] = []
+    if isinstance(extracted, dict):
+        # PDF returns {page_num: [Table, ...]}
+        for page_num in sorted(extracted.keys()):
+            for tbl in extracted[page_num]:
+                if tbl.df is not None and not tbl.df.empty:
+                    out.append(tbl.df)
+    elif isinstance(extracted, list):
+        for tbl in extracted:
+            if tbl.df is not None and not tbl.df.empty:
+                out.append(tbl.df)
+    return out
+
+
+# --- Semi-structured / JSON-ish helpers ---
+
+
+def parse_jsonish_value(val: object) -> object:
+    """Best-effort decode of stringified JSON / Python literal.
+
+    Returns the parsed object on success, or the original value unchanged
+    on failure. Handles single-quoted dicts (common in CSV exports)
+    via ast.literal_eval fallback.
+    """
+    if not isinstance(val, str):
+        return val
+    s = val.strip()
+    if not s or s[0] not in "{[":
+        return val
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError:
+        pass
+    try:
+        import ast
+        return ast.literal_eval(s)
+    except (ValueError, SyntaxError):
+        return val
+
+
+def parse_jsonish_column(df: pd.DataFrame, col: str) -> pd.Series:
+    """Apply parse_jsonish_value across a column, returning a parsed Series.
+
+    Useful when a CSV/JSON has dict-like strings stored in a single column.
+    Non-parseable cells are kept as-is, so type may be mixed.
+    """
+    return df[col].map(parse_jsonish_value)
+
+
+def explode_jsonish_column(
+    df: pd.DataFrame, col: str, *, prefix: str | None = None,
+) -> pd.DataFrame:
+    """Flatten a dict-string column into multiple top-level columns.
+
+    Each parsed dict's keys become new columns named ``<prefix>_<key>``
+    (or just ``<key>`` if prefix is None). Non-dict cells contribute NaN.
+    Original column is dropped from the returned frame; other columns
+    pass through unchanged.
+    """
+    parsed = parse_jsonish_column(df, col)
+    rows: list[dict] = []
+    for v in parsed:
+        if isinstance(v, dict):
+            rows.append({str(k): _v for k, _v in v.items()})
+        else:
+            rows.append({})
+    expanded = pd.DataFrame(rows, index=df.index)
+    if prefix:
+        expanded.columns = [f"{prefix}_{c}" for c in expanded.columns]
+    return pd.concat([df.drop(columns=[col]), expanded], axis=1)
+
+
+def coerce_numeric_id_columns(
+    *frames: pd.DataFrame, columns: list[str] | None = None,
+) -> tuple[pd.DataFrame, ...]:
+    """Coerce candidate ID columns to a consistent numeric type across frames.
+
+    Common pain: one frame has '12345' as str, another as int. A naive
+    merge silently loses every row. This helper picks the most-plausible
+    numeric form (int when lossless, else float) and returns COPIES of the
+    inputs with the affected columns coerced.
+
+    Args:
+        *frames: DataFrames to align.
+        columns: Restrict to these column names. If None, coerce every
+                 column whose name appears in all frames AND looks
+                 numeric-ish in at least one (heuristic: ``str.isdigit()``
+                 holds on >80% of non-null values when sampled).
+
+    Returns:
+        Tuple of new DataFrames (originals untouched).
+    """
+    if not frames:
+        return ()
+
+    if columns is None:
+        common = set(frames[0].columns)
+        for f in frames[1:]:
+            common &= set(f.columns)
+        candidates: list[str] = []
+        for c in common:
+            for f in frames:
+                sample = f[c].dropna().astype(str).head(50)
+                if len(sample) and (sample.str.fullmatch(r"-?\d+(\.\d+)?").mean() > 0.8):
+                    candidates.append(c)
+                    break
+        columns = candidates
+
+    if not columns:
+        return tuple(f.copy() for f in frames)
+
+    out: list[pd.DataFrame] = []
+    for f in frames:
+        nf = f.copy()
+        for c in columns:
+            if c not in nf.columns:
+                continue
+            nf[c] = pd.to_numeric(nf[c], errors="coerce")
+        out.append(nf)
+    return tuple(out)
+
+
+def join_with_type_coercion(
+    left: pd.DataFrame,
+    right: pd.DataFrame,
+    *,
+    left_on: str,
+    right_on: str | None = None,
+    how: str = "inner",
+) -> pd.DataFrame:
+    """Merge two frames with automatic type coercion on the join keys.
+
+    Tries plain merge first; if it returns 0 rows AND value_overlap on the
+    keys is also 0, attempts to coerce both keys to numeric and merges
+    again. Returns the better non-empty result, or the original (empty)
+    merge if neither worked.
+    """
+    right_on = right_on or left_on
+    naive: pd.DataFrame | None = None
+    try:
+        naive = left.merge(right, left_on=left_on, right_on=right_on, how=how)
+    except (ValueError, TypeError):
+        # Pandas refuses to merge incompatible types — fall through to coercion.
+        naive = None
+
+    if naive is not None and not naive.empty:
+        return naive
+
+    overlap = value_overlap(left, left_on, right, right_on)
+    if naive is not None and overlap["overlap"] > 0:
+        return naive  # actually no overlap problem; respect the empty result
+
+    left2, right2 = coerce_numeric_id_columns(left, right, columns=[left_on, right_on])
+    try:
+        coerced = left2.merge(right2, left_on=left_on, right_on=right_on, how=how)
+    except (ValueError, TypeError):
+        coerced = pd.DataFrame()
+    if not coerced.empty:
+        return coerced
+    return naive if naive is not None else pd.DataFrame()
+
+
 def assume_then(claim: str, holds: bool) -> None:
     """Record an explicit assumption and whether it holds.
 

@@ -161,6 +161,23 @@ def _format_flat_table(
             vals_str = ", ".join(f"'{v}'" for v in dv[:30])
             lines.append(f"DISTINCT {name} ({len(dv)}): {vals_str}")
 
+    # Semi-structured / type-anomaly flags worth surfacing to the planner.
+    # Lets the agent reach for parse_jsonish_column or coerce_numeric_id_columns
+    # instead of treating dict-strings as opaque text.
+    flag_callouts = {
+        "dict_like_string": (
+            "holds stringified dict/list — use parse_jsonish_column / "
+            "explode_jsonish_column"
+        ),
+        "mixed_type": "mixed Python types in cells — coerce before joining",
+    }
+    for c in columns:
+        flags = c.get("flags") or []
+        for flag in flags:
+            note = flag_callouts.get(flag)
+            if note:
+                lines.append(f"FLAG {c.get('name', '?')}: {note}")
+
     return "\n".join(lines)
 
 

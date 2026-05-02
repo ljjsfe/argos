@@ -71,6 +71,10 @@ def compute_column_stats(series: pd.Series, col_name: str = "") -> dict[str, Any
         if _is_mixed_type(non_null):
             flags.append("mixed_type")
 
+        # JSON-ish string detection (dict/list embedded as strings)
+        if _is_dict_like_string(non_null):
+            flags.append("dict_like_string")
+
     # ID candidate detection: high uniqueness + not constant
     if stats["uniqueness_ratio"] > 0.9 and n > 5 and "constant" not in flags:
         flags.append("id_candidate")
@@ -179,6 +183,29 @@ def _is_date_like(series: pd.Series) -> bool:
         if isinstance(v, str) and any(p.match(v) for p in _DATE_PATTERNS)
     )
     return matches / len(sample) > 0.5
+
+
+def _is_dict_like_string(series: pd.Series) -> bool:
+    """Check if a string column holds stringified dict/list values.
+
+    Heuristic: ≥60% of sampled non-null values start with '{' or '['
+    AND end with the matching close. Caught early so the agent can use
+    parse_jsonish_column / explode_jsonish_column instead of treating
+    the whole cell as an opaque string.
+    """
+    if series.dtype != object:
+        return False
+    sample = series.dropna().head(20)
+    if len(sample) < 5:
+        return False
+    hits = 0
+    for v in sample:
+        if not isinstance(v, str):
+            continue
+        s = v.strip()
+        if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
+            hits += 1
+    return hits / len(sample) >= 0.6
 
 
 def _is_mixed_type(series: pd.Series) -> bool:
