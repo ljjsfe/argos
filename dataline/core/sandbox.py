@@ -192,10 +192,18 @@ class Sandbox:
             step_id = f"step_{self._step_count}"
         self._step_count += 1
 
-        # Clear previous step_result.json so a failed step never inherits the
-        # previous step's structured output.
+        # Snapshot prior step_result.json so a clean step that ran verification
+        # code without re-calling save_result() can carry the prior answer
+        # forward (avoids missing_save_result loops). The prior is only
+        # restored at the end of THIS step when rc=0 AND no new save_result
+        # was written — so a failed step still cannot inherit stale output.
         result_path = Path(self._temp_dir) / "step_result.json"
+        prior_step_json = ""
         if result_path.exists():
+            try:
+                prior_step_json = result_path.read_text(encoding="utf-8")
+            except OSError:
+                prior_step_json = ""
             result_path.unlink()
 
         # SQL mode: wrap raw SQL in a Python runner script
@@ -214,7 +222,7 @@ class Sandbox:
         # resolution. Agent code that uses raw relative paths will fail by
         # design — prompt nudges agent toward safe_read_* helpers.
         if self._stateful_repl is not None and language == "python":
-            return self._execute_via_repl(code, step_id)
+            return self._execute_via_repl(code, step_id, prior_step_json)
 
         # Write code to temp file (in TEMP_DIR, not scratch — keeps scratch clean)
         code_path = Path(self._temp_dir) / f"{step_id}.py"
@@ -245,7 +253,9 @@ class Sandbox:
                 return_code=proc.returncode,
                 execution_time_ms=elapsed_ms,
                 step_id=step_id,
-                structured_json=self._read_step_result(),
+                structured_json=self._resolve_structured_json(
+                    proc.returncode, prior_step_json,
+                ),
             )
         except subprocess.TimeoutExpired:
             elapsed_ms = int((time.time() - start) * 1000)
@@ -270,7 +280,9 @@ class Sandbox:
             if use_scratch and os.path.exists(run_dir) and run_dir != self._temp_dir:
                 shutil.rmtree(run_dir, ignore_errors=True)
 
-    def _execute_via_repl(self, code: str, step_id: str) -> SandboxResult:
+    def _execute_via_repl(
+        self, code: str, step_id: str, prior_step_json: str = "",
+    ) -> SandboxResult:
         """Run Python via the persistent in-process REPL.
 
         NO os.chdir — global cwd would race parallel workers. REPL sets
@@ -284,8 +296,28 @@ class Sandbox:
             return_code=r.return_code,
             execution_time_ms=r.execution_time_ms,
             step_id=step_id,
-            structured_json=self._read_step_result(),
+            structured_json=self._resolve_structured_json(
+                r.return_code, prior_step_json,
+            ),
         )
+
+    def _resolve_structured_json(
+        self, return_code: int, prior_step_json: str,
+    ) -> str:
+        """Pick the structured_json for this step.
+
+        Carries the prior step's saved answer forward when current step ran
+        cleanly (rc=0) but did not call save_result() — avoids
+        missing_save_result loops on verification-only follow-up steps.
+        rc!=0 always returns whatever the step itself wrote (empty if
+        nothing) so failed steps cannot inherit stale answers.
+        """
+        current = self._read_step_result()
+        if current:
+            return current
+        if return_code == 0 and prior_step_json:
+            return prior_step_json
+        return ""
 
     def _wrap_sql(self, sql: str) -> str:
         """Wrap raw SQL in a DuckDB runner script.
