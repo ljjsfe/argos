@@ -1,8 +1,14 @@
-"""Analyzer agent: deep data profiling via code execution.
+"""Analyzer agent: domain-rules extraction from documentation.
 
-Returns two separate outputs:
-- data_profile: column statistics, distributions, sample rows
-- domain_rules: extracted from documentation files (manual, README, knowledge)
+Public API used by orchestrator:
+- _extract_domain_rules(manifest) — deterministic, reads doc files
+- compile_domain_rules(raw, llm, budget) — optional LLM compaction
+  for documents that exceed a token-budget fraction.
+
+Historical note: an LLM-driven `analyze()` profiling path existed but
+was superseded by the rich Profiler (csv_reader/sqlite_reader/etc.) which
+computes DISTINCT values, cardinality, and samples deterministically.
+The LLM profiling code was removed in v60 prompt audit.
 """
 
 from __future__ import annotations
@@ -12,10 +18,8 @@ import re
 from pathlib import Path
 
 from ..core.llm_client import LLMClient
-from ..core.sandbox import Sandbox
 from ..core.token_estimator import estimate_tokens
 from ..core.types import Manifest
-from ..profiler.manifest import manifest_to_json
 
 logger = logging.getLogger(__name__)
 
@@ -30,41 +34,6 @@ _COMPILE_BUDGET_FRACTION = 0.08
 # Each chunk must fit within the LLM's context window for compilation.
 # ~80K chars ≈ ~20K tokens, leaving room for prompt + output.
 _CHUNK_MAX_CHARS = 80_000
-
-
-def analyze(manifest: Manifest, llm: LLMClient, sandbox: Sandbox) -> tuple[str, str]:
-    """Generate and execute profiling code, return (data_profile, domain_rules).
-
-    Strategy:
-    1. Extract domain rules from documentation files (deterministic, no LLM)
-    2. LLM generates profiling code for structured data → execute
-    3. If execution fails, retry with a simpler prompt
-    4. If all retries fail, use deterministic fallback (manifest summary)
-
-    Note: DISTINCT values and cardinality are now computed by the Profiler
-    (csv_reader, sqlite_reader, etc.) and flow through compress_manifest().
-    """
-    # Step 1: Extract domain rules from documentation files (independent channel)
-    domain_rules = _extract_domain_rules(manifest)
-
-    # Step 2: Profile structured data
-    manifest_json = manifest_to_json(manifest)
-
-    try:
-        profile = _attempt_llm_profile(manifest_json, llm, sandbox)
-    except Exception as exc:
-        logger.warning("LLM profile failed: %s", exc)
-        profile = ""
-    if not profile:
-        try:
-            profile = _attempt_simple_profile(manifest_json, llm, sandbox)
-        except Exception as exc:
-            logger.warning("Simple profile failed: %s", exc)
-            profile = ""
-    if not profile:
-        profile = _deterministic_fallback(manifest_json)
-
-    return profile, domain_rules
 
 
 def compile_domain_rules(
@@ -318,74 +287,3 @@ def _read_text_file(file_path: str) -> str:
         except (OSError, UnicodeDecodeError):
             return ""
 
-
-def _attempt_llm_profile(manifest_json: str, llm: LLMClient, sandbox: Sandbox) -> str:
-    """Full LLM-generated profiling code."""
-    prompt_path = Path(__file__).parent.parent / "prompts" / "analyzer.md"
-    system_prompt = prompt_path.read_text(encoding="utf-8")
-    system_prompt = system_prompt.replace("{manifest_json}", manifest_json)
-
-    response = llm.chat(system_prompt, "Generate the profiling code now.")
-
-    code = _extract_code(response)
-    if not code:
-        code = response
-
-    result = sandbox.execute(code, step_id="analyzer", use_scratch=False)
-
-    if result.return_code == 0 and len(result.stdout.strip()) > 50:
-        return result.stdout
-
-    return ""
-
-
-def _attempt_simple_profile(manifest_json: str, llm: LLMClient, sandbox: Sandbox) -> str:
-    """Retry with a simpler prompt focused on robustness."""
-    simple_prompt = f"""Write Python code to profile these data files. Keep it simple and robust.
-
-## Files
-{manifest_json}
-
-## Rules
-1. TASK_DIR environment variable has the data path.
-2. For CSV files: use pandas with encoding='utf-8' first, then 'latin-1' as fallback. Print: shape, column names with dtypes, null counts, and for each column: unique count, min, max, and top 5 most frequent values.
-3. For JSON files: load with json module. Print: type (list/dict), length, and if list of dicts, print all keys and for each key show unique value count and top 5 values.
-4. For SQLite: print table names, schemas, row counts, and 3 sample rows per table.
-5. For text files (md/txt): skip — already handled separately.
-6. Wrap each file in try/except to ensure one file failure doesn't stop the whole script.
-7. Print "=== <filename> ===" header before each file summary.
-"""
-
-    response = llm.chat(simple_prompt, "Generate the profiling code now. Keep it simple.")
-
-    code = _extract_code(response)
-    if not code:
-        code = response
-
-    result = sandbox.execute(code, step_id="analyzer_retry", use_scratch=False)
-
-    if result.return_code == 0 and len(result.stdout.strip()) > 50:
-        return result.stdout
-
-    return ""
-
-
-def _deterministic_fallback(manifest_json: str) -> str:
-    """Always-works fallback using manifest metadata. No LLM needed."""
-    return (
-        "Data profile (from manifest metadata — profiling code failed, "
-        "so this is schema-level only. You MUST explore the actual data "
-        "in your first step before making assumptions about values):\n\n"
-        f"{manifest_json}"
-    )
-
-
-def _extract_code(response: str) -> str:
-    """Extract Python code from markdown code blocks."""
-    match = re.search(r"```python\s*\n(.*?)```", response, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    match = re.search(r"```\s*\n(.*?)```", response, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    return ""

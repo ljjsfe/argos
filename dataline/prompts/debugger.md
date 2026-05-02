@@ -33,7 +33,7 @@ Fix the following Python code that failed during data analysis execution.
    - FileNotFoundError → use `safe_read_csv()` or `safe_read_json()` which auto-resolve paths
    - sqlite3 error → check table/column names via `PRAGMA table_info()`; use quotes around table/column names with spaces
    - "unhashable type: list" → don't use list columns as dict keys; iterate instead
-   - JSONDecodeError → check if JSON is nested or has unexpected structure; use `describe_data()`
+   - JSONDecodeError → inspect the raw text first; if records are nested under a key like `data.records`, use `safe_read_json_df()` which auto-unwraps `{"records": [...]}` shapes
    - UnicodeDecodeError → use encoding="latin-1" or errors="replace"
 6. Return the COMPLETE fixed code (all imports, all logic).
 

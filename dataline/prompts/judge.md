@@ -15,14 +15,12 @@ Iteration {iteration} of {max_iterations}.
 
 Identify remaining **red flags** — reasons to believe the current answer is wrong or incomplete. Then choose an action.
 
-### Step 1 — Quote the answer (REQUIRED)
+### Step 1 — Identify the answer
 
-Copy the exact answer from stdout before any judgment.
-- Number, ratio, final value → quote verbatim
-- Result table → quote relevant rows
-- Nothing useful (schema only, 0 rows, error) → write "no answer found"
-
-This is your `quoted_answer`.
+Locate the actual computed value in stdout before judging it.
+- Number, ratio, final value → know it verbatim
+- Result table → know its rows and shape
+- Nothing useful (schema only, 0 rows, error) → there is no answer yet
 
 ### Step 2 — Red flag checks
 
@@ -42,11 +40,8 @@ Check specifically:
 **C — Is this just exploration?**
 RED FLAG if this step only prints schema, sample rows, or data types with no answer computed.
 
-**D — Domain formula compliance (skip if no Domain Rules section in context)**
-1. Identify the metric the question asks about (the noun being computed: e.g. "cost", "percentage of X", "total Y").
-2. Search Domain Rules for a definition of that metric. If none mentions it, skip this check.
-3. If a definition exists, compare the code's columns and aggregation against the documented formula.
-RED FLAG if the code uses different columns/aggregations than the documented formula (semantic equivalents like `SUM(CASE WHEN ...)` vs `COUNT(...) FILTER (WHERE ...)` are fine — only flag genuine divergence).
+**D — Domain formula compliance**
+Skip if there is no Domain Rules section. Otherwise: does the question reference a metric whose formula is given in Domain Rules? If yes, do the code's columns and aggregation match that formula? RED FLAG only on genuine divergence — semantic equivalents (e.g. `SUM(CASE WHEN ...)` vs `COUNT(...) FILTER (WHERE ...)`) are fine.
 
 If no red flags → finish.
 
@@ -82,9 +77,9 @@ answer to a "what is the X" question — accept it.
 
 ### Step 4 — Iteration context
 
-- Iterations 0–{max_iterations_minus_2}: apply checks strictly
-- Last 2 iterations (≥ {max_iterations_minus_2}): be lenient — accept partial answers rather than iterating further
-- Last iteration ({max_iterations_minus_1}): choose "finish" unless there is an obvious error
+- Iterations 0–{max_iterations_minus_2}: apply Step 2 red-flag checks strictly.
+- Last 2 iterations (≥ {max_iterations_minus_2}): still apply Step 2 — only accept if no red flag fires. Leniency applies ONLY to shape mismatches when `tie_possible=true`, NEVER to filter/aggregation/formula errors.
+- Last iteration ({max_iterations_minus_1}): choose "finish" only if no Step 2 red flag is active; otherwise still continue with the most actionable guidance.
 
 ---
 
@@ -101,7 +96,6 @@ If a pre-check flag shows ZERO_ROWS on a computation step:
 ## Output (JSON only)
 ```json
 {
-  "quoted_answer": "exact value from stdout, or 'no answer found'",
   "action": "finish",
   "reasoning": "Brief explanation of red flags found (or why none remain)",
   "missing": "",
