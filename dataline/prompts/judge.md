@@ -77,9 +77,9 @@ answer to a "what is the X" question — accept it.
 
 ### Step 4 — Iteration context
 
-- Iterations 0–{max_iterations_minus_2}: apply Step 2 red-flag checks strictly.
-- Last 2 iterations (≥ {max_iterations_minus_2}): still apply Step 2 — only accept if no red flag fires. Leniency applies ONLY to shape mismatches when `tie_possible=true`, NEVER to filter/aggregation/formula errors.
-- Last iteration ({max_iterations_minus_1}): choose "finish" only if no Step 2 red flag is active; otherwise still continue with the most actionable guidance.
+- Iterations 0–{max_iterations_minus_2}: apply checks strictly
+- Last 2 iterations (≥ {max_iterations_minus_2}): be lenient — accept partial answers rather than iterating further
+- Last iteration ({max_iterations_minus_1}): choose "finish" unless there is an obvious error
 
 ---
 
