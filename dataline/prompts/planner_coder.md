@@ -11,7 +11,7 @@ Before anything else, decide:
 Shape patterns:
 - "How many" / "count" / "percentage" / "total" / "average" → ONE aggregated row.
 - "List" / "which" (plural) → MULTIPLE rows, usually 1 column.
-- "X and Y of Z" / "X, Y, and Z of W" — multi-noun phrasing → 1 row, ONE COLUMN PER NOUN. Never merge nouns into a single column.
+- "X and Y of Z" → 1 row, multiple columns.
 - "For each" / "per" → table grouped by the entity.
 
 ### Step 2 — Map the question to source columns and formulas
@@ -22,8 +22,8 @@ Domain compliance (highest priority):
 - If a `Domain Knowledge` / `knowledge.md` section defines a metric matching the question, use its formula VERBATIM — same columns, same aggregation. Do not invent your own.
 
 Schema reminders:
-- Columns ending in `_id` or starting with `link_to_` are foreign keys → JOIN with the referenced primary table.
-- JOIN keys must have matching types — cast if needed (or use `coerce_numeric_id_columns` / `join_with_type_coercion`).
+- `link_to_X` columns are foreign keys → JOIN with table `X` on its primary key.
+- JOIN keys must have matching types — cast if needed.
 - String comparisons are case-sensitive in DuckDB — use `LOWER()` for case-insensitive matching.
 
 ### Step 3 — Write the query
@@ -43,9 +43,7 @@ Schema reminders:
 - **Libraries**: pandas, numpy, duckdb, json, re, os, pickle, collections, math
 - **Helpers** (`from data_helpers import *`):
   - **I/O (structured)**: `safe_read_csv`, `safe_read_json_df` (auto-unwraps `{"records":[...]}`), `safe_read_excel`
-  - **I/O (documents/multimodal)**: `safe_read_text(path)` → string (markdown/txt), `safe_read_pdf(path)` → string (text per page; auto OCR fallback for scanned PDFs), `safe_read_docx(path)` → string (paragraphs+tables), `safe_read_image(path)` → dict with `text` (OCR'd) + metadata, `safe_extract_tables(path)` → list[DataFrame] (PDF/image tables via img2table+tesseract)
-  - **Semi-structured (dict-string columns)**: `parse_jsonish_value(v)` / `parse_jsonish_column(df, 'col')` → parse stringified JSON cells; `explode_jsonish_column(df, 'col', prefix='p')` → flatten to wide columns
-  - **Type & join repair**: `coerce_numeric_id_columns(df_a, df_b)` → align int/string ID types pre-merge; `join_with_type_coercion(L, R, left_on='id')` → fault-tolerant merge that retries with coercion if naive join is empty
+  - **I/O (documents/multimodal)**: `safe_read_text(path)` → string (markdown/txt), `safe_read_pdf(path)` → string (text per page), `safe_read_docx(path)` → string (paragraphs+tables), `safe_read_image(path)` → `{width, height, mode, format, path}` metadata dict
   - **Probe** (cheap data-verification — print results to trace):
     - `describe_df(df)` → compact dtypes/nunique/sample summary, more useful than `df.info()`
     - `count_distinct(df, col)` → `{rows, distinct, ratio}`; ratio≈1 means PK, ratio≪1 means many duplicates per value
