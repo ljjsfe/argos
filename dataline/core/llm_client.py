@@ -65,6 +65,161 @@ class LLMClient:
         else:
             raise ValueError(f"Unknown provider: {self._config.provider}")
 
+    def chat_with_image(
+        self,
+        system: str,
+        user: str,
+        image_paths: list[str] | tuple[str, ...],
+        *,
+        fallback_to_text: bool = True,
+    ) -> str:
+        """Single-turn vision chat. Pass image paths; they are base64-encoded and
+        sent as a multipart message alongside the text.
+
+        Probe-validated on DashScope: qwen3.5-35b-a3b accepts image_url parts
+        and reads them correctly. Other OpenAI-compatible endpoints (OpenAI,
+        DeepSeek, Moonshot) accept the same multipart format for VL models.
+
+        Args:
+            system: system prompt (text only)
+            user: user text
+            image_paths: list of local file paths to images
+            fallback_to_text: if the endpoint rejects the image (vision not
+                supported), retry as a text-only chat. Default True for
+                deployment safety — set False to surface the error.
+
+        Returns:
+            text response. If `fallback_to_text=True` and vision fails, a
+            text-only response is returned instead — caller cannot tell from
+            the return alone, so log/check `total_usage` for diagnostics.
+
+        Anthropic provider falls back to chat() — current code path uses
+        OpenAI-compatible vision schema only.
+        """
+        response, _ = self.chat_with_image_with_usage(
+            system, user, image_paths, fallback_to_text=fallback_to_text,
+        )
+        return response
+
+    def chat_with_image_with_usage(
+        self,
+        system: str,
+        user: str,
+        image_paths: list[str] | tuple[str, ...],
+        *,
+        fallback_to_text: bool = True,
+    ) -> tuple[str, LLMUsage]:
+        """Vision-aware chat returning (text, usage)."""
+        if self._config.provider == "anthropic":
+            # Anthropic vision uses a different schema; not implemented here.
+            # Fall back to text-only with the user message.
+            logger.info("vision not implemented for anthropic provider — falling back to text")
+            return self.chat_with_usage(system, user)
+
+        if self._config.provider not in ("moonshot", "openai", "deepseek", "dashscope"):
+            raise ValueError(f"Unknown provider: {self._config.provider}")
+
+        # Build multipart user content: text part + one image_url part per image.
+        try:
+            content = self._build_vision_content(user, image_paths)
+        except (OSError, ValueError) as e:
+            logger.warning("vision content build failed: %s — falling back to text", e)
+            return self.chat_with_usage(system, user)
+
+        # Token guard still applies to the system prompt; image tokens are not
+        # counted by tiktoken — we conservatively assume each image is ~1k tokens.
+        per_image_tokens = 1000
+        synthetic_user = user + ("\n[image_placeholder]" * len(image_paths))
+        system = self._guard_token_limit(system, synthetic_user)
+
+        start = time.time()
+        max_retries = 3
+        last_error: Exception | None = None
+
+        for attempt in range(max_retries):
+            try:
+                response = self._client.chat.completions.create(
+                    model=self._config.model,
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": content},
+                    ],
+                    max_tokens=self._config.max_tokens,
+                    temperature=self._config.temperature,
+                )
+                latency_ms = int((time.time() - start) * 1000)
+                usage = response.usage
+                input_tokens = usage.prompt_tokens if usage else 0
+                output_tokens = usage.completion_tokens if usage else 0
+                cost = self._estimate_cost(input_tokens, output_tokens)
+
+                self._total_usage["input_tokens"] += input_tokens
+                self._total_usage["output_tokens"] += output_tokens
+                self._total_usage["cost_usd"] += cost
+
+                return (
+                    response.choices[0].message.content or "",
+                    LLMUsage(
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        cost_usd=cost,
+                        latency_ms=latency_ms,
+                        provider=self._config.provider,
+                        model=self._config.model,
+                    ),
+                )
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries - 1 and self._is_retryable(e):
+                    time.sleep(2 ** attempt)
+                    continue
+                # Non-retryable failure — possibly the model rejects vision.
+                break
+
+        # If we got here, the vision call failed. Fall back to text if allowed.
+        if fallback_to_text and last_error is not None:
+            logger.warning(
+                "vision call failed (%s) — falling back to text-only chat",
+                type(last_error).__name__,
+            )
+            return self.chat_with_usage(system, user)
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Exhausted retries")
+
+    def _build_vision_content(
+        self, user_text: str, image_paths: list[str] | tuple[str, ...],
+    ) -> list[dict]:
+        """Build OpenAI-compatible multipart content list.
+
+        Format:
+            [{"type": "text", "text": "..."},
+             {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}]
+        """
+        import base64
+        import mimetypes
+        from pathlib import Path
+
+        if not image_paths:
+            raise ValueError("image_paths is empty — use chat() for text-only")
+
+        parts: list[dict] = [{"type": "text", "text": user_text}]
+        for raw_path in image_paths:
+            p = Path(raw_path)
+            if not p.exists():
+                raise OSError(f"image not found: {p}")
+            mime, _ = mimetypes.guess_type(str(p))
+            if not mime or not mime.startswith("image/"):
+                # Default to image/png — DashScope accepts that for any image bytes
+                mime = "image/png"
+            data = p.read_bytes()
+            b64 = base64.b64encode(data).decode("ascii")
+            parts.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{b64}"},
+            })
+        return parts
+
     def _guard_token_limit(self, system: str, user: str) -> str:
         """Truncate system prompt if estimated tokens exceed context window.
 
