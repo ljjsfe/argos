@@ -230,6 +230,23 @@ def run_task(
             _log(trace, "playbook", f"retrieval failed (fail-soft): {e}")
             obs["playbook_retrieved"] = []
 
+        # ─── Stage 3e: Image attachments (zero LLM, just discovery) ───
+        # If the manifest contains image or scanned-style PDF files, prepare
+        # to attach them to every PlannerCoder call. The agent decides whether
+        # to use the visual or the structured path; we don't hard-route.
+        # KDD/DABstep tasks have no images → empty tuple → falls through to
+        # ordinary chat() path with no behavior change.
+        image_paths: tuple[str, ...] = tuple(
+            e.file_path for e in manifest.entries
+            if e.file_type in ("image", "pdf")
+        )
+        if image_paths:
+            _log(trace, "vision", f"Attaching {len(image_paths)} visual file(s) to planner: "
+                 f"{[__import__('os').path.basename(p) for p in image_paths]}")
+            obs["vision_attached"] = [__import__("os").path.basename(p) for p in image_paths]
+        else:
+            obs["vision_attached"] = []
+
         # Track execution state
         steps_done: list[StepRecord] = []
         # Best non-blocked result for fallback when max_iterations exhausted
@@ -272,6 +289,7 @@ def run_task(
                     traced_llm, state=state, cm=cm,
                     iteration=iteration,
                     max_iterations=max_iterations,
+                    image_paths=image_paths,
                 )
             _log(trace, "planner_coder",
                  f"Plan: {pc_output.plan.step_description} | "

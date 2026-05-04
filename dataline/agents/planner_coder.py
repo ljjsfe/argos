@@ -80,24 +80,39 @@ def generate(
     qa_guidance: str = "",
     iteration: int = 0,
     max_iterations: int = 8,
+    image_paths: tuple[str, ...] = (),
 ) -> PlannerCoderOutput:
     """Generate plan + code candidates in a single LLM call.
 
     Uses ContextManager to assemble full context within token budget.
     Returns PlannerCoderOutput with plan and ordered candidates.
+
+    When ``image_paths`` is non-empty, uses ``chat_with_image`` so the model
+    sees the visual data alongside the schema. The agent decides whether to
+    rely on vision or on structured/text helpers — there is no hard route.
+    Falls back to text chat if vision rejected (transparent to caller).
     """
     if state and cm:
         prompt = _build_context_managed_prompt(
             state, cm, llm,
             iteration=iteration, max_iterations=max_iterations,
+            image_paths=image_paths,
         )
     else:
         prompt = _build_legacy_prompt(question, manifest_json, data_profile, steps_done)
 
-    response = llm.chat(
-        system=_PROMPT_TEMPLATE,
-        user=prompt,
-    )
+    if image_paths:
+        response = llm.chat_with_image(
+            system=_PROMPT_TEMPLATE,
+            user=prompt,
+            image_paths=list(image_paths),
+            fallback_to_text=True,
+        )
+    else:
+        response = llm.chat(
+            system=_PROMPT_TEMPLATE,
+            user=prompt,
+        )
 
     prior_plan = steps_done[-1].plan if steps_done else None
     return _parse_response(response, prior_plan=prior_plan)
@@ -110,6 +125,7 @@ def _build_context_managed_prompt(
     *,
     iteration: int = 0,
     max_iterations: int = 8,
+    image_paths: tuple[str, ...] = (),
 ) -> str:
     """Build budget-managed context — clean and focused.
 
@@ -208,6 +224,31 @@ def _build_context_managed_prompt(
                 f"{state.playbook_hints}"
             ),
             priority=88,
+            compressible=False,
+            heading="",
+        ))
+
+    # Image / PDF attachments — surfaced to the planner so it knows the
+    # visuals are in scope. The actual binary content rides via the
+    # vision-aware chat call (LLMClient.chat_with_image), not the prompt
+    # text. This block just lists filenames + advisory framing.
+    if image_paths:
+        import os as _os
+        names = ", ".join(_os.path.basename(p) for p in image_paths)
+        sections.append(Section(
+            name="image_data",
+            content=(
+                f"## Image / PDF data available\n"
+                f"Files: {names}\n\n"
+                f"These files are attached to this message as visual data. "
+                f"Use them directly when the question asks about visual "
+                f"content (charts, scanned tables, diagrams). For "
+                f"questions answerable from structured CSV/JSON/SQLite "
+                f"alone, ignore them and write SQL or pandas code as "
+                f"usual. Reference image filenames in your reasoning if "
+                f"relying on them."
+            ),
+            priority=89,
             compressible=False,
             heading="",
         ))
