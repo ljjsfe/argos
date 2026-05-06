@@ -1,0 +1,51 @@
+# Build cache + git
+.git/
+.gitignore
+.codex_checkpoints/
+.pytest_cache/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.coverage
+.mypy_cache/
+.ruff_cache/
+
+# Eval artifacts (use /input mount instead)
+results/
+public/
+data/
+
+# Local clutter
+*.pkl
+*.tmp
+*.log
+*.db
+attendance.db
+cards.db
+database.db
+transactions_1k.db
+step_result.json
+result.txt
+
+# Docs not needed at runtime
+docs/
+*.md
+!CLAUDE.md
+
+# Test code not needed in submitted image
+dataline/tests/
+
+# Scripts (build-time only, not runtime)
+scripts/
+*.sh
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+
+# Env / secrets
+.env
+.env.*
+.envrc
