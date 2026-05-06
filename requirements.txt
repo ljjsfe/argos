@@ -1,7 +1,6 @@
 pandas>=2.0,<2.3
 numpy>=1.24,<2
 openai>=1.0
-anthropic>=0.30
 pdfplumber>=0.10
 python-docx>=1.0
 openpyxl>=3.1
@@ -11,6 +10,15 @@ duckdb>=1.0
 pyyaml>=6.0
 python-dotenv>=1.0
 langfuse>=4.0
-# Multimodal (Phase 2 readiness — opt-in)
+# Token accounting (top-level import in dataline/core/token_estimator.py)
+tiktoken>=0.6
+# SQL static analysis (HarnessGate sql_column_count / sql_where_value rules)
+sqlglot>=22.0
+# PDF rasterize fallback for safe_read_pdf when text layer is missing
+PyMuPDF>=1.23
+# Multimodal (Phase 2 readiness — opt-in / lazy import)
 pytesseract>=0.3.10
 img2table>=1.4
+# anthropic SDK removed: per spec §5.1 only Qwen is the primary solver,
+# and llm_client.provider is "dashscope" — anthropic path is dead at
+# eval time; dropping the SDK trims ~50MB from the image.
