@@ -49,13 +49,14 @@ docker buildx build \
     .
 
 echo "==> Inspecting image..."
-docker image inspect "$IMAGE" --format '
-  Image      : {{.Id}}
-  Size (b)   : {{.Size}}
-  Arch       : {{.Architecture}} / {{.Os}}
-  Cmd / Entry: {{.Config.Cmd}} / {{.Config.Entrypoint}}'
+# Use --format with separate calls so a missing field (e.g. Cmd is nil
+# when only ENTRYPOINT is set) does not abort the whole inspect.
+docker image inspect "$IMAGE" --format '  Image      : {{.Id}}' || true
+docker image inspect "$IMAGE" --format '  Size       : {{.Size}} bytes' || true
+docker image inspect "$IMAGE" --format '  Arch / Os  : {{.Architecture}} / {{.Os}}' || true
+docker image inspect "$IMAGE" --format '  Entrypoint : {{.Config.Entrypoint}}' || true
 
-ARCH=$(docker image inspect "$IMAGE" --format '{{.Architecture}}/{{.Os}}')
+ARCH=$(docker image inspect "$IMAGE" --format '{{.Architecture}}/{{.Os}}' 2>/dev/null || echo "unknown/unknown")
 if [[ "$ARCH" != "amd64/linux" ]]; then
     echo "Error: image is $ARCH, must be amd64/linux" >&2
     exit 1
