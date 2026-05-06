@@ -1,7 +1,9 @@
 llm:
   provider: dashscope
-  model: qwen3.5-35b-a3b
-  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  # Per KDD Cup 2026 spec §5.2: API URL / API Key must NOT be hardcoded
+  # in code, config files, or images. Read at runtime from env vars
+  # (MODEL_API_URL / MODEL_API_KEY / MODEL_NAME — injected by evaluator).
+  # For local dev, set them in .env (gitignored).
   api_key_env: DASHSCOPE_API_KEY
   max_tokens: 8192
   temperature: 0.0
