@@ -27,7 +27,9 @@ eval:
   dabstep_dir: data/dabstep
 
 batch:
-  # Kimi Tier 2: concurrent 100, RPM 500, TPM 3M/min
-  # At parallel 10: ~12 RPM, ~147K TPM — well within limits
-  # Wall clock for 20 dev tasks: ~23 min
-  parallel: 10
+  # Local dev (DashScope): parallel=10 tested OK on 50 KDD tasks (~25 min).
+  # KDD Cup eval (internal Qwen, 16 vCPU, 64GB, 12h for ~400 tasks):
+  # conservative parallel=8 — leaves 2 vCPU headroom and 20% margin under
+  # unknown rate limits. Estimated wall clock ~50 min on 400 tasks,
+  # well under 12h cap. Bump after first submission confirms slack.
+  parallel: 8
