@@ -40,23 +40,34 @@ OUTPUT_DIR="${PWD}/results/local_submission_test_$(date +%H%M%S)"
 LOG_DIR="${OUTPUT_DIR}/logs"
 mkdir -p "$OUTPUT_DIR" "$LOG_DIR"
 
-# Optional: temp /input subset for fast smoke tests
+# Optional: temp /input subset for fast smoke tests.
+# Using cp -r (not symlinks) because Docker mounts don't follow host-side
+# symlinks pointing outside the mounted root.
 if [[ -n "$N_TASKS" ]]; then
     SUBSET_DIR="${OUTPUT_DIR}/_input_subset"
     mkdir -p "$SUBSET_DIR"
     # shellcheck disable=SC2012
     ls -d "$INPUT_DIR"/task_* | head -n "$N_TASKS" | while read -r d; do
-        ln -s "$d" "$SUBSET_DIR/$(basename "$d")"
+        cp -R "$d" "$SUBSET_DIR/"
     done
     INPUT_DIR="$SUBSET_DIR"
-    echo "==> Subset: ${N_TASKS} tasks at $INPUT_DIR"
+    echo "==> Subset: ${N_TASKS} tasks copied to $INPUT_DIR"
 fi
 
+# Eval host has 16 vCPU + 64GB; local Mac usually has fewer. Detect and
+# clamp so we don't fail before the agent even starts.
+HOST_CPUS=$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 8)
+HOST_CPUS=$(( HOST_CPUS - 1 ))    # leave 1 CPU for the host
+HOST_CPUS=$(( HOST_CPUS < 16 ? HOST_CPUS : 16 ))
+HOST_MEM_GB=$(( $(sysctl -n hw.memsize 2>/dev/null || echo $((64*1024*1024*1024))) / 1024 / 1024 / 1024 ))
+HOST_MEM_GB=$(( HOST_MEM_GB > 64 ? 64 : HOST_MEM_GB - 4 ))   # leave 4 GB for host
+
+echo "==> Local CPUs:${HOST_CPUS} Mem:${HOST_MEM_GB}g (eval has 16/64)"
 echo "==> Running $IMAGE on $INPUT_DIR..."
 docker run --rm \
     --platform=linux/amd64 \
-    --cpus=16 \
-    --memory=64g \
+    --cpus="${HOST_CPUS}" \
+    --memory="${HOST_MEM_GB}g" \
     -v "${INPUT_DIR}:/input:ro" \
     -v "${OUTPUT_DIR}:/output:rw" \
     -v "${LOG_DIR}:/logs:rw" \
