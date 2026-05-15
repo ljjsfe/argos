@@ -59,6 +59,12 @@ def run_task_heavy(
     heavy_cfg = (config or {}).get("heavy_mode", {}) or {}
     max_iterations = (config or {}).get("agent", {}).get("max_iterations", 8)
 
+    # Track real wall time of the whole heavy_runner invocation. The
+    # individual TaskResults' time_seconds are sequential (each one's own
+    # elapsed) and would double-count the K-1 trajectories that run in
+    # parallel. Reporting their sum overstates the wall-clock cost.
+    wrapper_start = time.time()
+
     # ── Phase 1: baseline trajectory at the LLM's current temperature ──
     baseline = run_task(
         task_dir=task_dir,
@@ -188,7 +194,17 @@ def run_task_heavy(
         "deliberator_reasoning": decision.reasoning[:500],
         "extra_trajectory_dirs": extra_trajectory_dirs,
         "baseline_answer_csv_preview": _answer_dict_to_csv(baseline.answer)[:1000],
+        # Compute-time accounting (sum across trajectories; double-counts the
+        # parallel ones, kept here for cost/usage transparency).
+        "compute_time_seconds": round(sum(r.time_seconds for r in all_results), 2),
     })
+
+    # Real wall-clock time of the whole heavy_runner invocation. Extra
+    # trajectories run in parallel via ThreadPoolExecutor, so summing their
+    # individual time_seconds overstates the user-perceived latency by
+    # ~ (K-1)x for K=3. Use the wrapper-level timer instead — it's what
+    # downstream KDD budget calculations care about.
+    wall_seconds = round(time.time() - wrapper_start, 2)
 
     return TaskResult(
         task_id=baseline.task_id,
@@ -201,7 +217,7 @@ def run_task_heavy(
         observations=baseline.observations,
         total_tokens=sum(r.total_tokens for r in all_results),
         total_cost_usd=sum(r.total_cost_usd for r in all_results),
-        time_seconds=sum(r.time_seconds for r in all_results),
+        time_seconds=wall_seconds,
         success=baseline.success,
         error=baseline.error,
         benchmark=baseline.benchmark,
