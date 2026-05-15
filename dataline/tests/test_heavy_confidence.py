@@ -29,8 +29,11 @@ def _make_iteration(
         flags.append({"rule": r, "severity": "warn"})
     for r in (block_rules or []):
         flags.append({"rule": r, "severity": "block"})
+    # Match the real orchestrator schema: flat `judge_action` key,
+    # not nested `judge.action`. See dataline/agents/orchestrator.py
+    # where iter_obs["judge_action"] is set.
     return {
-        "judge": {"action": judge_action},
+        "judge_action": judge_action,
         "code_success": code_success,
         "harness_flags": flags,
         "multi_candidate_disagree": multi_candidate_disagree,
@@ -173,3 +176,53 @@ def test_is_confident_wrapper_true():
 def test_is_confident_wrapper_false():
     r = _result([_make_iteration(judge_action="continue")])
     assert is_confident(r, max_iterations=8) is False
+
+
+# ─────────────── regression: real orchestrator schema ───────────────
+
+def test_real_schema_flat_judge_action_field():
+    """Regression for the silent-judge-bug: heavy_confidence used to look up
+    last_iter['judge']['action'] (nested dict) but orchestrator stores
+    iter_obs['judge_action'] (flat string). Result: judge signal was always
+    "" and the judge check never fired. Force a test that uses the FLAT
+    key explicitly to lock the schema.
+    """
+    real_schema_iter = {
+        "iteration": 0,
+        "judge_action": "continue (warn_soft_retry)",  # flat string, not nested
+        "judge_reasoning": "shape mismatch",
+        "code_success": True,
+        "harness_flags": [],
+    }
+    r = _result([real_schema_iter])
+    rep = evaluate_confidence(r, max_iterations=8)
+    assert rep.is_confident is False
+    # Reason should include the judge action text
+    assert any("judge_" in x for x in rep.reasons), f"reasons={rep.reasons}"
+
+
+def test_real_schema_finish_is_accepted():
+    """Counterpart: the real-schema flat 'finish' value must pass."""
+    real_schema_iter = {
+        "iteration": 0,
+        "judge_action": "finish",
+        "judge_reasoning": "answer present",
+        "code_success": True,
+        "harness_flags": [],
+    }
+    r = _result([real_schema_iter])
+    assert is_confident(r, max_iterations=8) is True
+
+
+def test_real_schema_finish_with_parenthetical_suffix_is_NOT_finish():
+    """`continue (finish_overridden_missing_save_result)` etc. are continue
+    states, not finish. They must trigger heavy."""
+    real_schema_iter = {
+        "iteration": 0,
+        "judge_action": "continue (finish_overridden_missing_save_result)",
+        "code_success": True,
+        "harness_flags": [],
+    }
+    r = _result([real_schema_iter])
+    rep = evaluate_confidence(r, max_iterations=8)
+    assert rep.is_confident is False

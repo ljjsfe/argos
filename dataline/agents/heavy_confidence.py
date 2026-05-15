@@ -83,11 +83,16 @@ def evaluate_confidence(
         reasons.append("no_iteration_recorded")
         return ConfidenceReport(False, tuple(reasons))
 
-    # Judge action — only "finish" is a confident accept
-    judge = (last_iter.get("judge") or {})
-    judge_action = (judge.get("action") or "").lower()
+    # Judge action — only a clean "finish" is a confident accept.
+    # NOTE: orchestrator stores this as a FLAT `judge_action` key
+    # (e.g. "finish" / "continue" / "continue (warn_soft_retry)" /
+    #       "continue (harness_blocked)" / "backtrack"), NOT as a nested
+    # `judge.action` dict. The previous code read `last_iter["judge"]["action"]`
+    # which silently returned "" and disabled this check.
+    judge_action = (last_iter.get("judge_action") or "").lower()
     if judge_action and judge_action != "finish":
-        reasons.append(f"judge_{judge_action}")
+        # Truncate to keep observation logs compact; full string is in trace.
+        reasons.append(f"judge_{judge_action[:40]}")
 
     # Sandbox return code — anything non-zero means the final code errored
     if last_iter.get("code_success") is False:
