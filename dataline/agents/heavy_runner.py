@@ -167,6 +167,18 @@ def run_task_heavy(
     # output. Add a heavy_mode block to observations for telemetry.
     final_answer = _csv_to_answer_dict(decision.final_answer_csv)
 
+    # Persist per-trajectory predictions so debugging + post-hoc analysis
+    # can see what each thinker actually proposed (the deliberator may have
+    # overridden a correct baseline). One CSV per trajectory + an aggregate
+    # JSON for quick inspection.
+    _save_trajectory_artifacts(
+        output_dir=output_dir,
+        baseline=baseline,
+        additional_results=additional_results,
+        trajectories=trajectories,
+        decision=decision,
+    )
+
     baseline.observations.setdefault("heavy_mode", {}).update({
         "triggered": True,
         "k_trajectories": len(trajectories),
@@ -175,6 +187,7 @@ def run_task_heavy(
         "deliberator_matched_trajectory_id": decision.matched_trajectory_id,
         "deliberator_reasoning": decision.reasoning[:500],
         "extra_trajectory_dirs": extra_trajectory_dirs,
+        "baseline_answer_csv_preview": _answer_dict_to_csv(baseline.answer)[:1000],
     })
 
     return TaskResult(
@@ -325,3 +338,70 @@ def _count_distinct_answers(trajs: list[HeavyTrajectory]) -> int:
     """Telemetry: how many trajectories produced distinct answers?"""
     answers = {t.final_answer_csv.strip() for t in trajs}
     return len(answers)
+
+
+def _save_trajectory_artifacts(
+    *,
+    output_dir: str,
+    baseline: TaskResult,
+    additional_results: list[TaskResult],
+    trajectories: list[HeavyTrajectory],
+    decision: "HeavyDecision",
+) -> None:
+    """Write per-trajectory prediction CSV + a summary JSON to output_dir.
+
+    The main prediction.csv is the deliberator's synthesized answer (written
+    by main.py via save_prediction). Here we add:
+
+      - heavy_baseline_prediction.csv   — baseline (traj_0) answer
+      - heavy_t1_prediction.csv         — first extra trajectory's answer
+      - heavy_t2_prediction.csv         — etc.
+      - heavy_trajectories.json         — aggregated metadata for analysis
+
+    Best-effort: failures here are logged but do not crash the pipeline.
+    """
+    if not output_dir:
+        return
+    import json as _json
+    out_path = Path(output_dir)
+    try:
+        out_path.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return
+
+    # Per-trajectory CSV (baseline + each extra). Match traj_id order.
+    all_task_results = [baseline, *additional_results]
+    for ti, result in enumerate(all_task_results):
+        name = "heavy_baseline_prediction.csv" if ti == 0 else f"heavy_t{ti}_prediction.csv"
+        try:
+            csv = _answer_dict_to_csv(result.answer)
+            (out_path / name).write_text(csv, encoding="utf-8")
+        except Exception as e:
+            logger.warning("Failed to write %s: %s", name, e)
+
+    # Aggregated metadata
+    summary = {
+        "k_trajectories": len(trajectories),
+        "trajectories": [
+            {
+                "traj_id": t.traj_id,
+                "temperature": t.temperature,
+                "final_code_lang": t.final_code_lang,
+                "judge_action": t.judge_action,
+                "harness_flags": list(t.harness_flags),
+                "steps_executed": t.steps_executed,
+                "success": t.success,
+                "answer_preview": t.final_answer_csv[:500],
+            }
+            for t in trajectories
+        ],
+        "deliberator_matched_trajectory_id": decision.matched_trajectory_id,
+        "deliberator_reasoning": decision.reasoning[:500],
+        "deliberator_final_answer_preview": decision.final_answer_csv[:500],
+    }
+    try:
+        (out_path / "heavy_trajectories.json").write_text(
+            _json.dumps(summary, indent=2, default=str), encoding="utf-8",
+        )
+    except Exception as e:
+        logger.warning("Failed to write heavy_trajectories.json: %s", e)
