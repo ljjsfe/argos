@@ -219,3 +219,46 @@ class CompareReport:
     improved_tasks: tuple[str, ...] = ()
     regressed_tasks: tuple[str, ...] = ()
     per_difficulty_delta: dict[str, float] = field(default_factory=dict)
+
+
+# ─── HeavySkill (test-time scaling via parallel reasoning + deliberation) ───
+#
+# When the Phase-1 trajectory's confidence signal is weak (HarnessGate WARN,
+# Judge "continue", multi-candidate disagreement, etc.), the orchestrator
+# spawns K-1 additional trajectories at higher temperature and asks a
+# deliberator to synthesize the final answer across all K trajectories.
+#
+# Reference: arXiv 2605.02396 "HeavySkill: Heavy Thinking as the Inner Skill
+# in Agentic Harness" — two-stage pipeline (parallel reasoning + sequential
+# deliberation), serialized memory cache, no iterative deliberation.
+
+
+@dataclass(frozen=True)
+class HeavyTrajectory:
+    """One independent trajectory's summary, serialized into the
+    deliberator's memory cache. Frozen so the cache is immutable once built.
+    """
+    traj_id: int                          # 0, 1, 2 — Phase-1 baseline is always traj_id=0
+    temperature: float                    # sampling temperature used for this trajectory
+    final_answer_csv: str                 # canonical CSV the trajectory's Finalizer produced
+    final_code: str                       # winning candidate code (SQL or Python)
+    final_code_lang: str                  # "sql" | "python"
+    raw_stdout_tail: str                  # last ~2KB of sandbox stdout
+    judge_action: str                     # "finish" | "continue" | "backtrack" | "" (no judge ran)
+    judge_reasoning: str                  # judge's reasoning (truncated)
+    harness_flags: tuple[str, ...] = ()   # WARN/BLOCK rule names that fired
+    steps_executed: int = 0
+    success: bool = True
+
+
+@dataclass(frozen=True)
+class HeavyDecision:
+    """Output of the deliberator after seeing K trajectories.
+
+    The deliberator may pick a trajectory's answer outright, blend across
+    trajectories, or write a corrected answer if all K are judged wrong.
+    """
+    final_answer_csv: str          # the deliberator's synthesized answer
+    reasoning: str                 # short explanation of how the deliberator chose
+    matched_trajectory_id: int     # -1 if synthesized, else id of trajectory whose answer was kept
+    trajectories_seen: int         # K — for telemetry
