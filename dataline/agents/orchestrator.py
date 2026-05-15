@@ -82,6 +82,11 @@ class TaskResult:
     success: bool = True
     error: str = ""
     benchmark: str = "kdd"
+    # In-memory deterministic task context (manifest + domain rules) computed
+    # during Stage 1+2. HeavySkill extras can reuse this instead of re-running
+    # the profiler/domain compile. Excluded from repr and compare because it
+    # holds live objects (Manifest) that don't serialize cleanly.
+    runtime_context: Any = field(default=None, repr=False, compare=False)
 
 
 def run_task(
@@ -208,6 +213,18 @@ def run_task(
         obs["analyzer"] = {
             "domain_rules_length_chars": len(domain_rules),
         }
+
+        # Capture the deterministic task-level work for HeavySkill extras to
+        # reuse without re-running profiler / domain extraction. Only built
+        # when this run did the work itself — when precomputed_context is
+        # provided, we keep that same reference so callers can chain.
+        from ..core.types import PrecomputedTaskContext as _PrecCtx
+        runtime_ctx = precomputed_context if precomputed_context is not None else _PrecCtx(
+            manifest=manifest,
+            manifest_json=manifest_json,
+            domain_rules_raw=domain_rules_raw,
+            domain_rules=domain_rules,
+        )
 
         # ─── Stage 3: Initialize state ───
         state = create_initial_state(
@@ -740,6 +757,7 @@ def run_task(
             total_cost_usd=usage.get("cost_usd", 0.0),
             time_seconds=elapsed,
             benchmark=benchmark,
+            runtime_context=runtime_ctx,
         )
 
     except Exception as e:
