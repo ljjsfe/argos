@@ -262,3 +262,26 @@ class HeavyDecision:
     reasoning: str                 # short explanation of how the deliberator chose
     matched_trajectory_id: int     # -1 if synthesized, else id of trajectory whose answer was kept
     trajectories_seen: int         # K — for telemetry
+
+
+@dataclass(frozen=True)
+class PrecomputedTaskContext:
+    """Task-level work that is deterministic given task_dir and can be
+    shared across trajectories in HeavySkill heavy mode.
+
+    Computing the profiler manifest and extracting/compiling domain rules
+    are expensive (large profiler scans hit hundreds of seconds; LLM-based
+    domain-rule compilation costs another ~25K tokens). Without sharing,
+    each of K trajectories re-does the same work — measured in v71/v72
+    traces as ~2500-3000s wasted profiler time per 50-task batch.
+
+    `manifest` is the live Manifest object (frozen dataclass elsewhere),
+    `manifest_json` is its serialized form for prompt injection,
+    `domain_rules_raw` is the freshly-extracted document text,
+    `domain_rules` is the optionally-compiled version (possibly prefixed
+    with a metric_index).
+    """
+    manifest: "Manifest"
+    manifest_json: str
+    domain_rules_raw: str
+    domain_rules: str

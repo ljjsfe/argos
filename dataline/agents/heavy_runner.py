@@ -26,7 +26,10 @@ from typing import Any
 import pandas as pd
 
 from ..core.llm_client import LLMClient
-from ..core.types import HeavyDecision, HeavyTrajectory
+from ..core.types import HeavyDecision, HeavyTrajectory, PrecomputedTaskContext
+from ..profiler import manifest as profiler
+from ..profiler.manifest import manifest_to_json
+from . import analyzer
 from . import heavy_confidence
 from . import heavy_deliberator
 from .orchestrator import TaskResult, run_task
@@ -65,6 +68,15 @@ def run_task_heavy(
     # parallel. Reporting their sum overstates the wall-clock cost.
     wrapper_start = time.time()
 
+    # ── Phase 0: shared task context (computed once, reused across K trajectories) ──
+    # Profiler scan + domain rules extraction are deterministic given task_dir.
+    # Without this cache, K=3 heavy mode would re-scan the same dataset 3 times
+    # (measured: ~2500-3000s wasted profiler time per 50-task batch in v71/v72).
+    # We only cache when heavy mode might trigger (saves a no-op when disabled).
+    shared_ctx: PrecomputedTaskContext | None = None
+    if heavy_cfg.get("enabled", False):
+        shared_ctx = _compute_shared_context(task_dir, llm, config)
+
     # ── Phase 1: baseline trajectory at the LLM's current temperature ──
     baseline = run_task(
         task_dir=task_dir,
@@ -76,6 +88,7 @@ def run_task_heavy(
         benchmark=benchmark,
         guidelines=guidelines,
         session_id=session_id,
+        precomputed_context=shared_ctx,
     )
 
     if not heavy_cfg.get("enabled", False):
@@ -133,6 +146,7 @@ def run_task_heavy(
                     session_id=f"{session_id}__t{traj_id}" if session_id else "",
                     traj_id=traj_id,
                     traj_temp=float(temps[traj_id]),
+                    precomputed_context=shared_ctx,
                 ): traj_id
                 for traj_id in range(1, K)
             }
@@ -240,12 +254,16 @@ def _run_one_trajectory(
     session_id: str,
     traj_id: int,
     traj_temp: float,
+    precomputed_context: PrecomputedTaskContext | None = None,
 ) -> TaskResult | None:
     """Run one heavy trajectory inside a worker thread.
 
     Wrapped in try/except so a single trajectory crash doesn't kill the
     whole heavy mode invocation — the deliberator can work with whatever
     trajectories succeeded.
+
+    `precomputed_context` lets all K trajectories share the same profiler
+    manifest + domain_rules instead of redoing the work K times.
     """
     start = time.time()
     try:
@@ -259,6 +277,7 @@ def _run_one_trajectory(
             benchmark=benchmark,
             guidelines=guidelines,
             session_id=session_id,
+            precomputed_context=precomputed_context,
         )
         elapsed = time.time() - start
         logger.info("Heavy traj %d T=%.2f done in %.1fs", traj_id, traj_temp, elapsed)
@@ -266,6 +285,45 @@ def _run_one_trajectory(
     except Exception as e:
         logger.warning("Heavy trajectory %d failed: %s", traj_id, e)
         return None
+
+
+def _compute_shared_context(
+    task_dir: str,
+    llm: LLMClient,
+    config: dict,
+) -> PrecomputedTaskContext:
+    """Compute the task-level work (profiler + domain rules) once.
+
+    Mirrors orchestrator.run_task Stage 1 + Stage 2 logic. We bypass the
+    tracer (no per-trajectory log noise) and the per-trajectory LLM
+    counter (compile_domain_rules's LLM call is shared overhead).
+
+    Failures fall through to the caller — if profile fails, we return a
+    minimal manifest so heavy mode can degrade gracefully to a no-cache
+    K-trajectory run rather than crashing.
+    """
+    from ..core.context_manager import ContextManager
+    from .metric_matcher import build_metric_index
+
+    manifest = profiler.scan(task_dir)
+    manifest_json = manifest_to_json(manifest)
+    domain_rules_raw = analyzer._extract_domain_rules(manifest)
+
+    cm_budget = config.get("llm", {}).get("context_window", 262_144)
+    cm = ContextManager(token_limit=cm_budget)
+    domain_rules = analyzer.compile_domain_rules(
+        domain_rules_raw, llm, cm.budget_tokens,
+    )
+    metric_index = build_metric_index(domain_rules_raw)
+    if metric_index:
+        domain_rules = metric_index + "\n\n---\n\n" + domain_rules
+
+    return PrecomputedTaskContext(
+        manifest=manifest,
+        manifest_json=manifest_json,
+        domain_rules_raw=domain_rules_raw,
+        domain_rules=domain_rules,
+    )
 
 
 def _trajectory_output_dir(base_output_dir: str, traj_id: int) -> str:

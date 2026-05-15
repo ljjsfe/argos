@@ -94,8 +94,16 @@ def run_task(
     benchmark: str = "kdd",
     guidelines: str = "",
     session_id: str = "",
+    precomputed_context: Any = None,
 ) -> TaskResult:
-    """Run the full agent pipeline on a single task."""
+    """Run the full agent pipeline on a single task.
+
+    When `precomputed_context` is provided (a `PrecomputedTaskContext` dataclass),
+    Stage 1 (profiler scan) and Stage 2 (domain-rules extraction + compile)
+    are SKIPPED — the cached manifest/domain_rules are used directly. This is
+    safe because both are deterministic given task_dir. Used by HeavySkill
+    heavy_runner to share work across K parallel trajectories on the same task.
+    """
     start_time = time.time()
     trace: list[dict] = []
     max_iterations = config.get("agent", {}).get("max_iterations", 3)
@@ -141,42 +149,59 @@ def run_task(
     }
 
     try:
-        # ─── Stage 1: Profile (deterministic, zero LLM cost) ───
-        with tracer.span("profiler"):
-            _log(trace, "profiler", "Scanning task directory")
-            manifest = profiler.scan(task_dir)
-            manifest_json = manifest_to_json(manifest)
-            _log(trace, "profiler", f"Found {len(manifest.entries)} files, "
+        # ─── Stage 1+2: profile + domain rules (use cache if provided) ───
+        if precomputed_context is not None:
+            # Reuse manifest + domain_rules from heavy-mode shared cache.
+            manifest = precomputed_context.manifest
+            manifest_json = precomputed_context.manifest_json
+            domain_rules_raw = precomputed_context.domain_rules_raw
+            domain_rules = precomputed_context.domain_rules
+            _log(trace, "profiler", f"Using shared cache: {len(manifest.entries)} files, "
                  f"{len(manifest.cross_source_relations)} relations")
+            obs["profiler"] = {
+                "files_found": len(manifest.entries),
+                "file_types": sorted({e.file_type for e in manifest.entries}),
+                "cross_source_relations": len(manifest.cross_source_relations),
+                "total_size_bytes": sum(e.size_bytes for e in manifest.entries),
+                "shared_cache_used": True,
+            }
+        else:
+            # Stage 1: Profile (deterministic, zero LLM cost)
+            with tracer.span("profiler"):
+                _log(trace, "profiler", "Scanning task directory")
+                manifest = profiler.scan(task_dir)
+                manifest_json = manifest_to_json(manifest)
+                _log(trace, "profiler", f"Found {len(manifest.entries)} files, "
+                     f"{len(manifest.cross_source_relations)} relations")
 
-        obs["profiler"] = {
-            "files_found": len(manifest.entries),
-            "file_types": sorted({e.file_type for e in manifest.entries}),
-            "cross_source_relations": len(manifest.cross_source_relations),
-            "total_size_bytes": sum(e.size_bytes for e in manifest.entries),
-        }
+            obs["profiler"] = {
+                "files_found": len(manifest.entries),
+                "file_types": sorted({e.file_type for e in manifest.entries}),
+                "cross_source_relations": len(manifest.cross_source_relations),
+                "total_size_bytes": sum(e.size_bytes for e in manifest.entries),
+            }
 
-        # ─── Stage 2: Domain rules (deterministic, zero LLM cost) ───
-        with tracer.span("domain_rules"):
-            _log(trace, "domain_rules", "Extracting domain rules from docs")
-            domain_rules_raw = analyzer._extract_domain_rules(manifest)
+            # Stage 2: Domain rules (deterministic + optional LLM compile)
+            with tracer.span("domain_rules"):
+                _log(trace, "domain_rules", "Extracting domain rules from docs")
+                domain_rules_raw = analyzer._extract_domain_rules(manifest)
 
-            # Compile if very large (conditional LLM call)
-            domain_rules = analyzer.compile_domain_rules(
-                domain_rules_raw, traced_llm, cm.budget_tokens,
-            )
-            if len(domain_rules) < len(domain_rules_raw):
-                _log(trace, "domain_rules",
-                     f"Compiled: {len(domain_rules_raw)} → {len(domain_rules)} chars")
+                # Compile if very large (conditional LLM call)
+                domain_rules = analyzer.compile_domain_rules(
+                    domain_rules_raw, traced_llm, cm.budget_tokens,
+                )
+                if len(domain_rules) < len(domain_rules_raw):
+                    _log(trace, "domain_rules",
+                         f"Compiled: {len(domain_rules_raw)} → {len(domain_rules)} chars")
 
-            # Promote metric definitions to a structured top-of-doc index.
-            # Helps small models locate formulas without scanning long prose.
-            from .metric_matcher import build_metric_index
-            metric_index = build_metric_index(domain_rules_raw)
-            if metric_index:
-                domain_rules = metric_index + "\n\n---\n\n" + domain_rules
-                _log(trace, "domain_rules",
-                     f"Promoted {metric_index.count(chr(10) + '- ')} metric definitions to index")
+                # Promote metric definitions to a structured top-of-doc index.
+                # Helps small models locate formulas without scanning long prose.
+                from .metric_matcher import build_metric_index
+                metric_index = build_metric_index(domain_rules_raw)
+                if metric_index:
+                    domain_rules = metric_index + "\n\n---\n\n" + domain_rules
+                    _log(trace, "domain_rules",
+                         f"Promoted {metric_index.count(chr(10) + '- ')} metric definitions to index")
 
         workspace.write_domain_rules(domain_rules)
 
