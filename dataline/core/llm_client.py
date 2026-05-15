@@ -35,9 +35,17 @@ class LLMClient:
     def _build_client(self) -> Any:
         if self._config.provider in ("moonshot", "openai", "deepseek", "dashscope"):
             from openai import OpenAI
+            # timeout=120: prevent half-closed sockets / dead servers from hanging
+            #   workers indefinitely. Matches sandbox.timeout_seconds for consistency.
+            #   Production-critical: KDD eval has 12h hard limit per submission.
+            # max_retries=0: disable client-side retry — we have our own retry
+            #   loop with backoff in _chat_openai_compat. Double retry compounds
+            #   delays under rate-limit conditions.
             return OpenAI(
                 api_key=self._config.api_key,
                 base_url=self._config.base_url,
+                timeout=120.0,
+                max_retries=0,
             )
         elif self._config.provider == "anthropic":
             import anthropic
@@ -407,7 +415,7 @@ def create_client_from_config(config: dict) -> LLMClient:
             api_key=api_key,
             base_url=base_url,
             max_tokens=llm_cfg.get("max_tokens", 8192),
-            temperature=llm_cfg.get("temperature", 0.0),
+            temperature=float(os.environ.get("TEMPERATURE", "") or llm_cfg.get("temperature", 0.0)),
             context_window=llm_cfg.get("context_window", 262_144),
         )
     )

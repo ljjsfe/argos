@@ -103,7 +103,7 @@ def _cmd_run(args):
 
     print(f"Running task: {task_id}")
     print(f"Question: {question}")
-    print(f"Model: {config['llm']['provider']}/{config['llm']['model']}")
+    print(f"Model: {config['llm']['provider']}/{os.environ.get('MODEL_NAME', '') or config['llm'].get('model', '<unset>')}")
     print(f"Session: {session_id}")
     print()
 
@@ -280,13 +280,26 @@ def _batch_kdd(args, config, run_task, save_prediction, create_client_from_confi
     if args.tasks:
         task_ids = args.tasks
     else:
-        task_ids = sorted([
+        # LPT (Longest Processing Time first): order by difficulty so hard/extreme
+        # tasks start early and don't strand workers idle in the final stretch.
+        # task.json carries the difficulty label for KDD; missing/unknown → medium.
+        _DIFF_RANK = {"extreme": 0, "hard": 1, "medium": 2, "easy": 3}
+        def _task_priority(tid: str) -> tuple[int, str]:
+            tj = os.path.join(input_dir, tid, "task.json")
+            try:
+                with open(tj) as f:
+                    diff = json.load(f).get("difficulty", "medium")
+            except Exception:
+                diff = "medium"
+            return (_DIFF_RANK.get(diff, 2), tid)
+        all_tids = [
             d for d in os.listdir(input_dir)
             if os.path.isdir(os.path.join(input_dir, d))
-        ])
+        ]
+        task_ids = sorted(all_tids, key=_task_priority)
 
     parallel = getattr(args, "parallel", 1) or 1
-    print(f"[KDD] Running {len(task_ids)} tasks | {config['llm']['provider']}/{config['llm']['model']}")
+    print(f"[KDD] Running {len(task_ids)} tasks | {config['llm']['provider']}/{os.environ.get('MODEL_NAME', '') or config['llm'].get('model', '<unset>')}")
     print(f"[KDD] Parallelism: {parallel}")
     print()
 
