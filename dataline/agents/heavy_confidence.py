@@ -18,7 +18,6 @@ Rules calibrated from Exp 2 (v68/v70 multi-trajectory diversity):
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -134,159 +133,9 @@ def evaluate_confidence(
     if last_iter.get("multi_candidate_disagree"):
         reasons.append("multi_candidate_disagree")
 
-    # ── 7. Final-answer sanity checks ──
-    # These are intentionally conservative and generic. They do not reject
-    # the answer; they only say "do not trust the cheap single trajectory".
-    # This targets the recurring v75 failure mode where a clean 1-shot SQL
-    # answer passed Judge/Harness but answered the wrong requested entity
-    # (e.g. "countries" → Date column, "finish time" → time+milliseconds).
-    reasons.extend(_answer_sanity_reasons(result))
-
     return ConfidenceReport(len(reasons) == 0, tuple(reasons))
 
 
 def is_confident(result: Any, max_iterations: int) -> bool:
     """Boolean convenience wrapper around evaluate_confidence."""
     return evaluate_confidence(result, max_iterations).is_confident
-
-
-# ---------------------------------------------------------------------------
-# Final-answer sanity checks
-# ---------------------------------------------------------------------------
-
-_SCALAR_Q_RE = re.compile(
-    r"\b(how many|what is|what's|calculate|compute|percentage|percent|ratio|"
-    r"average|mean|sum|total|count|number of)\b",
-    re.IGNORECASE,
-)
-_LIST_Q_RE = re.compile(r"\b(list|give|show|which|what are|who are)\b", re.IGNORECASE)
-
-_REQUESTED_COLUMN_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("country", ("country", "countries", "nation")),
-    ("date", ("date", "day", "month", "year")),
-    ("time", ("time", "duration", "milliseconds")),
-    ("name", ("name", "title")),
-    ("phone", ("phone", "number")),
-    ("text", ("text", "comment", "body", "description", "content")),
-    ("type", ("type", "category", "status")),
-    ("funding", ("funding", "fund")),
-    ("id", ("id", "identifier")),
-)
-
-_AMBIGUOUS_HINTS = {"number"}  # "driver number" is valid; "number of" is scalar.
-
-
-def _answer_sanity_reasons(result: Any) -> list[str]:
-    """Return uncertainty reasons derived from final answer shape/columns.
-
-    Uses only the final answer dict and natural-language question. The checks
-    are precision-biased: they fire on obvious shape/entity mismatches and
-    avoid domain-specific labels.
-    """
-    answer = getattr(result, "answer", None)
-    question = (getattr(result, "question", "") or "").lower()
-    if not isinstance(answer, dict):
-        return []
-
-    reasons: list[str] = []
-    columns = [str(c) for c in answer.keys()]
-    normalized_cols = [_norm_col(c) for c in columns]
-    row_count = _answer_row_count(answer)
-
-    if not answer or row_count == 0:
-        reasons.append("answer_empty")
-        return reasons
-
-    if _looks_scalar_question(question) and not _looks_compound_scalar_question(question) and len(columns) > 1:
-        # One scalar question should not produce extra data columns. This is a
-        # common KDD scoring failure because extra columns reduce matching.
-        reasons.append(f"answer_extra_columns:{len(columns)}")
-
-    if _looks_list_question(question) and len(columns) == 1:
-        requested = _requested_hints(question)
-        if requested and not _columns_match_any_hint(normalized_cols, requested):
-            reasons.append("answer_column_semantic_mismatch")
-
-    if _asks_for_tally(question) and not _has_count_column(normalized_cols):
-        reasons.append("answer_missing_count_column")
-
-    return reasons
-
-
-def _answer_row_count(answer: dict) -> int:
-    if not answer:
-        return 0
-    lengths = []
-    for value in answer.values():
-        if isinstance(value, list):
-            lengths.append(len(value))
-        elif value is None or str(value).strip() == "":
-            lengths.append(0)
-        else:
-            lengths.append(1)
-    return max(lengths) if lengths else 0
-
-
-def _looks_scalar_question(question: str) -> bool:
-    # "number of" is scalar, but "driver number" usually asks for a list
-    # column named number. Avoid over-triggering on "which ... number".
-    if re.search(r"\bwhich\b.+\bnumber\b", question):
-        return False
-    return bool(_SCALAR_Q_RE.search(question))
-
-
-def _looks_compound_scalar_question(question: str) -> bool:
-    """Return True for questions that legitimately ask for multiple scalars."""
-    metric_hits = len(re.findall(
-        r"\b(average|avg|mean|sum|total|count|percentage|percent|ratio|number of)\b",
-        question,
-    ))
-    return metric_hits >= 2 and bool(re.search(r"\b(and|,)\b", question))
-
-
-def _looks_list_question(question: str) -> bool:
-    return bool(_LIST_Q_RE.search(question))
-
-
-def _asks_for_tally(question: str) -> bool:
-    return bool(re.search(r"\b(tally|count by|counts by|frequency|distribution)\b", question))
-
-
-def _norm_col(col: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", col.lower()).strip("_")
-
-
-def _requested_hints(question: str) -> set[str]:
-    hints: set[str] = set()
-    for canonical, terms in _REQUESTED_COLUMN_HINTS:
-        for term in terms:
-            if term in _AMBIGUOUS_HINTS:
-                continue
-            if re.search(rf"\b{re.escape(term)}s?\b", question):
-                hints.add(canonical)
-                break
-    # "countries" is not covered by the simple optional-s regex above.
-    if re.search(r"\bcountries\b", question):
-        hints.add("country")
-    return hints
-
-
-def _columns_match_any_hint(cols: list[str], hints: set[str]) -> bool:
-    for col in cols:
-        for hint in hints:
-            if hint in col:
-                return True
-            if hint == "country" and ("nation" in col or "country" in col):
-                return True
-            if hint == "id" and (col == "id" or col.endswith("_id") or col.endswith("id")):
-                return True
-    return False
-
-
-def _has_count_column(cols: list[str]) -> bool:
-    return any(
-        col in {"count", "cnt", "n", "frequency", "freq", "tally"}
-        or col.endswith("_count")
-        or col.endswith("_cnt")
-        for col in cols
-    )

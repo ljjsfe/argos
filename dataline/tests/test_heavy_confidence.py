@@ -14,8 +14,6 @@ class _MockResult:
     success: bool = True
     error: str = ""
     observations: dict[str, Any] = field(default_factory=dict)
-    question: str = ""
-    answer: dict[str, Any] | None = None
 
 
 def _make_iteration(
@@ -42,19 +40,11 @@ def _make_iteration(
     }
 
 
-def _result(
-    iterations: list[dict],
-    success: bool = True,
-    error: str = "",
-    question: str = "",
-    answer: dict[str, Any] | None = None,
-) -> _MockResult:
+def _result(iterations: list[dict], success: bool = True, error: str = "") -> _MockResult:
     return _MockResult(
         success=success,
         error=error,
         observations={"iterations": iterations},
-        question=question,
-        answer=answer,
     )
 
 
@@ -236,76 +226,3 @@ def test_real_schema_finish_with_parenthetical_suffix_is_NOT_finish():
     r = _result([real_schema_iter])
     rep = evaluate_confidence(r, max_iterations=8)
     assert rep.is_confident is False
-
-
-# ─────────────── final-answer sanity checks ───────────────
-
-def test_empty_final_answer_not_confident():
-    r = _result(
-        [_make_iteration()],
-        question="List the countries of gas stations.",
-        answer={"Country": []},
-    )
-    rep = evaluate_confidence(r, max_iterations=8)
-    assert rep.is_confident is False
-    assert "answer_empty" in rep.reasons
-
-
-def test_scalar_question_extra_columns_not_confident():
-    r = _result(
-        [_make_iteration()],
-        question="What's the finish time for the driver who ranked second?",
-        answer={"time": ["+14.925"], "milliseconds": [5532328]},
-    )
-    rep = evaluate_confidence(r, max_iterations=8)
-    assert rep.is_confident is False
-    assert any(x.startswith("answer_extra_columns") for x in rep.reasons)
-
-
-def test_compound_scalar_extra_columns_stays_confident():
-    r = _result(
-        [_make_iteration()],
-        question="What is the average up votes and average user age?",
-        answer={"avg_up_votes": [182.2], "avg_user_age": [34.1]},
-    )
-    assert is_confident(r, max_iterations=8) is True
-
-
-def test_list_question_semantic_column_mismatch_not_confident():
-    r = _result(
-        [_make_iteration()],
-        question="Please list the countries of the gas stations.",
-        answer={"Date": ["2012-08-23"]},
-    )
-    rep = evaluate_confidence(r, max_iterations=8)
-    assert rep.is_confident is False
-    assert "answer_column_semantic_mismatch" in rep.reasons
-
-
-def test_list_question_matching_column_stays_confident():
-    r = _result(
-        [_make_iteration()],
-        question="Please list the countries of the gas stations.",
-        answer={"Country": ["CZE", "SVK"]},
-    )
-    assert is_confident(r, max_iterations=8) is True
-
-
-def test_tally_without_count_column_not_confident():
-    r = _result(
-        [_make_iteration()],
-        question="Tally the toxicology element of the 4th atom of each molecule.",
-        answer={"element": ["c", "br", "c"]},
-    )
-    rep = evaluate_confidence(r, max_iterations=8)
-    assert rep.is_confident is False
-    assert "answer_missing_count_column" in rep.reasons
-
-
-def test_tally_with_count_column_stays_confident():
-    r = _result(
-        [_make_iteration()],
-        question="Tally the toxicology element of the 4th atom of each molecule.",
-        answer={"element": ["c", "br"], "count": [2, 1]},
-    )
-    assert is_confident(r, max_iterations=8) is True
