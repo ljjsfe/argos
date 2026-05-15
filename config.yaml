@@ -19,6 +19,17 @@ agent:
 sandbox:
   timeout_seconds: 120
   max_memory_mb: 1024
+  # In-process Python REPL with persistent globals across iterations.
+  # Set to false for production: pandas/numpy C extensions (notably
+  # pandas.explode in reshape.cpython-*.so) are NOT thread-safe under
+  # concurrent in-process execution. HeavySkill heavy mode spawns up to
+  # parallel * (K-1) = 16+ Python threads simultaneously and triggered
+  # SIGSEGV (KERN_INVALID_ADDRESS at 0x1) on 2026-05-15 v74 run.
+  # Subprocess sandbox (stateful_python=false) gives process isolation:
+  # each Python execution is a fresh subprocess, native crashes can't
+  # poison the parent. Costs ~50-100ms startup per call but eliminates
+  # the risk of a single segfault killing the whole 12h KDD batch.
+  stateful_python: false
 
 synthesizer:
   mode: kdd
