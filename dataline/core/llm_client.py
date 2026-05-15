@@ -32,19 +32,24 @@ class LLMClient:
         self._client = self._build_client()
         self._total_usage = {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
 
-    def with_temperature(self, temperature: float) -> "LLMClient":
+    def with_temperature(self, temperature: float, *, share_usage: bool = True) -> "LLMClient":
         """Return a sibling client with a different sampling temperature.
 
         Reuses the underlying HTTP client (no new connection pool) and
-        shares the same usage counter, so total tokens/cost are still
-        accounted for centrally. Used by HeavySkill to spawn K-1
-        high-temperature trajectories without breaking accounting.
+        shares the same usage counter by default, so total tokens/cost are
+        still accounted for centrally. HeavySkill can opt out of shared usage
+        for parallel trajectories because each trajectory returns its own
+        TaskResult and shared counters would otherwise be double-counted.
         """
         from dataclasses import replace
         sibling = LLMClient.__new__(LLMClient)
         sibling._config = replace(self._config, temperature=temperature)
         sibling._client = self._client            # reuse pooled HTTP client
-        sibling._total_usage = self._total_usage  # share counter
+        sibling._total_usage = self._total_usage if share_usage else {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cost_usd": 0.0,
+        }
         return sibling
 
     def _build_client(self) -> Any:

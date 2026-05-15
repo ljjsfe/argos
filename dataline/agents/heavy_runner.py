@@ -68,16 +68,10 @@ def run_task_heavy(
     # parallel. Reporting their sum overstates the wall-clock cost.
     wrapper_start = time.time()
 
-    # ── Phase 0: shared task context (computed once, reused across K trajectories) ──
-    # Profiler scan + domain rules extraction are deterministic given task_dir.
-    # Without this cache, K=3 heavy mode would re-scan the same dataset 3 times
-    # (measured: ~2500-3000s wasted profiler time per 50-task batch in v71/v72).
-    # We only cache when heavy mode might trigger (saves a no-op when disabled).
-    shared_ctx: PrecomputedTaskContext | None = None
-    if heavy_cfg.get("enabled", False):
-        shared_ctx = _compute_shared_context(task_dir, llm, config)
-
     # ── Phase 1: baseline trajectory at the LLM's current temperature ──
+    # Keep baseline behavior identical to non-heavy mode. v73 tried to feed
+    # baseline through a precomputed shared context and changed several
+    # stable answers; only extra trajectories may use the shared cache.
     baseline = run_task(
         task_dir=task_dir,
         question=question,
@@ -88,7 +82,6 @@ def run_task_heavy(
         benchmark=benchmark,
         guidelines=guidelines,
         session_id=session_id,
-        precomputed_context=shared_ctx,
     )
 
     if not heavy_cfg.get("enabled", False):
@@ -116,6 +109,24 @@ def run_task_heavy(
     if len(temps) < K:
         temps = temps + [0.7] * (K - len(temps))
 
+    # ── Phase 3a: shared task context for extra trajectories only ──
+    # Profiler scan + domain rules extraction are deterministic given task_dir.
+    # Compute them once after the confidence gate says heavy mode is needed.
+    # This preserves baseline semantics while avoiding K-1 repeated scans.
+    shared_ctx: PrecomputedTaskContext | None = None
+    shared_usage = {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
+    if K > 1:
+        try:
+            shared_llm = llm.with_temperature(0.0, share_usage=False)
+            shared_ctx = _compute_shared_context(task_dir, shared_llm, config)
+            shared_usage = shared_llm.total_usage
+        except Exception as e:
+            logger.warning(
+                "Shared context computation failed; extra trajectories will "
+                "fall back to self-contained runs: %s",
+                e,
+            )
+
     # Run K-1 additional trajectories CONCURRENTLY (not serially). Each
     # trajectory has its own Sandbox (different temp_dir) and output_dir,
     # so there are no shared-state collisions. The LLMClient's OpenAI client
@@ -128,7 +139,7 @@ def run_task_heavy(
     extra_trajectory_dirs = [
         _trajectory_output_dir(output_dir, traj_id) for traj_id in range(1, K)
     ]
-    additional_results: list[TaskResult] = []
+    additional_by_id: dict[int, TaskResult] = {}
     if K > 1:
         parallel_start = time.time()
         with ThreadPoolExecutor(max_workers=K - 1) as ex:
@@ -137,7 +148,9 @@ def run_task_heavy(
                     _run_one_trajectory,
                     task_dir=task_dir,
                     question=question,
-                    llm=llm.with_temperature(float(temps[traj_id])),
+                    llm=llm.with_temperature(
+                        float(temps[traj_id]), share_usage=False,
+                    ),
                     config=config,
                     task_id=f"{task_id}_t{traj_id}",
                     output_dir=extra_trajectory_dirs[traj_id - 1],
@@ -155,23 +168,32 @@ def run_task_heavy(
                 try:
                     res = fut.result()
                     if res is not None:
-                        additional_results.append(res)
+                        additional_by_id[tid] = res
                 except Exception as e:
                     logger.warning("Heavy trajectory %d crashed: %s", tid, e)
         logger.info("Heavy %d trajectories ran in parallel in %.1fs",
                     K - 1, time.time() - parallel_start)
 
+    additional_results = [additional_by_id[i] for i in range(1, K) if i in additional_by_id]
     all_results = [baseline, *additional_results]
     trajectories = [
-        _to_heavy_trajectory(r, traj_id=i, temperature=float(temps[i]) if i < len(temps) else 0.7)
-        for i, r in enumerate(all_results)
+        _to_heavy_trajectory(baseline, traj_id=0, temperature=float(temps[0])),
+        *[
+            _to_heavy_trajectory(
+                additional_by_id[i],
+                traj_id=i,
+                temperature=float(temps[i]) if i < len(temps) else 0.7,
+            )
+            for i in range(1, K)
+            if i in additional_by_id
+        ],
     ]
 
     # ── Phase 4: deliberator synthesizes final answer ──
     # Deliberator runs at temperature=0 for stable synthesis (paper §4.2:
     # deliberation benefits from instruction-following over creative sampling).
-    deliberator_llm = llm.with_temperature(0.0)
-    domain_rules = baseline.observations.get("analyzer", {}).get("domain_rules_compiled", "")
+    deliberator_llm = llm.with_temperature(0.0, share_usage=False)
+    domain_rules = shared_ctx.domain_rules if shared_ctx is not None else ""
 
     decision = heavy_deliberator.deliberate(
         question=question,
@@ -180,6 +202,7 @@ def run_task_heavy(
         domain_rules=domain_rules,
         seed=heavy_cfg.get("deliberator_shuffle_seed"),
     )
+    deliberator_usage = deliberator_llm.total_usage
 
     # ── Build the final TaskResult ──
     # Strategy: keep baseline.trace + .observations (most informative — the
@@ -208,6 +231,11 @@ def run_task_heavy(
         "deliberator_reasoning": decision.reasoning[:500],
         "extra_trajectory_dirs": extra_trajectory_dirs,
         "baseline_answer_csv_preview": _answer_dict_to_csv(baseline.answer)[:1000],
+        "shared_context_used_for_extra_trajectories": shared_ctx is not None,
+        "shared_context_tokens": shared_usage["input_tokens"] + shared_usage["output_tokens"],
+        "shared_context_cost_usd": round(shared_usage["cost_usd"], 6),
+        "deliberator_tokens": deliberator_usage["input_tokens"] + deliberator_usage["output_tokens"],
+        "deliberator_cost_usd": round(deliberator_usage["cost_usd"], 6),
         # Compute-time accounting (sum across trajectories; double-counts the
         # parallel ones, kept here for cost/usage transparency).
         "compute_time_seconds": round(sum(r.time_seconds for r in all_results), 2),
@@ -229,8 +257,16 @@ def run_task_heavy(
             {"agent": "heavy_deliberator", "message": f"Decision: matched={decision.matched_trajectory_id} | {decision.reasoning[:120]}"},
         ],
         observations=baseline.observations,
-        total_tokens=sum(r.total_tokens for r in all_results),
-        total_cost_usd=sum(r.total_cost_usd for r in all_results),
+        total_tokens=(
+            sum(r.total_tokens for r in all_results)
+            + shared_usage["input_tokens"] + shared_usage["output_tokens"]
+            + deliberator_usage["input_tokens"] + deliberator_usage["output_tokens"]
+        ),
+        total_cost_usd=(
+            sum(r.total_cost_usd for r in all_results)
+            + shared_usage["cost_usd"]
+            + deliberator_usage["cost_usd"]
+        ),
         time_seconds=wall_seconds,
         success=baseline.success,
         error=baseline.error,
