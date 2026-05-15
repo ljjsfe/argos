@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -96,38 +97,49 @@ def run_task_heavy(
     if len(temps) < K:
         temps = temps + [0.7] * (K - len(temps))
 
-    # The first temperature corresponds to the baseline (already run).
-    # We need K-1 more trajectories.
+    # Run K-1 additional trajectories CONCURRENTLY (not serially). Each
+    # trajectory has its own Sandbox (different temp_dir) and output_dir,
+    # so there are no shared-state collisions. The LLMClient's OpenAI client
+    # is thread-safe; only the _total_usage counter is shared but its
+    # underlying update is a single dict mutation (acceptable accounting drift).
+    #
+    # Wall-time impact: when K=3, sequential ran 2 trajectories back-to-back
+    # (~660s typical). Parallel runs them simultaneously (~330s = max of the two),
+    # cutting heavy-task wall time roughly in half. Same total token budget.
+    extra_trajectory_dirs = [
+        _trajectory_output_dir(output_dir, traj_id) for traj_id in range(1, K)
+    ]
     additional_results: list[TaskResult] = []
-    extra_trajectory_dirs: list[str] = []
-    for traj_id in range(1, K):
-        traj_temp = float(temps[traj_id])
-        traj_llm = llm.with_temperature(traj_temp)
-        # Run with a different output_dir so traces don't clobber the baseline.
-        traj_output_dir = _trajectory_output_dir(output_dir, traj_id)
-        extra_trajectory_dirs.append(traj_output_dir)
-
-        traj_start = time.time()
-        try:
-            traj_result = run_task(
-                task_dir=task_dir,
-                question=question,
-                llm=traj_llm,
-                config=config,
-                task_id=f"{task_id}_t{traj_id}",
-                output_dir=traj_output_dir,
-                benchmark=benchmark,
-                guidelines=guidelines,
-                session_id=f"{session_id}__t{traj_id}" if session_id else "",
-            )
-        except Exception as e:
-            # Don't let a single failed trajectory poison the whole task.
-            # Log and continue with whatever trajectories did succeed.
-            logger.warning("Heavy trajectory %d failed: %s", traj_id, e)
-            continue
-        traj_result_elapsed = time.time() - traj_start
-        additional_results.append(traj_result)
-        logger.info("Heavy traj %d T=%.2f done in %.1fs", traj_id, traj_temp, traj_result_elapsed)
+    if K > 1:
+        parallel_start = time.time()
+        with ThreadPoolExecutor(max_workers=K - 1) as ex:
+            futures = {
+                ex.submit(
+                    _run_one_trajectory,
+                    task_dir=task_dir,
+                    question=question,
+                    llm=llm.with_temperature(float(temps[traj_id])),
+                    config=config,
+                    task_id=f"{task_id}_t{traj_id}",
+                    output_dir=extra_trajectory_dirs[traj_id - 1],
+                    benchmark=benchmark,
+                    guidelines=guidelines,
+                    session_id=f"{session_id}__t{traj_id}" if session_id else "",
+                    traj_id=traj_id,
+                    traj_temp=float(temps[traj_id]),
+                ): traj_id
+                for traj_id in range(1, K)
+            }
+            for fut in as_completed(futures):
+                tid = futures[fut]
+                try:
+                    res = fut.result()
+                    if res is not None:
+                        additional_results.append(res)
+                except Exception as e:
+                    logger.warning("Heavy trajectory %d crashed: %s", tid, e)
+        logger.info("Heavy %d trajectories ran in parallel in %.1fs",
+                    K - 1, time.time() - parallel_start)
 
     all_results = [baseline, *additional_results]
     trajectories = [
@@ -184,6 +196,47 @@ def run_task_heavy(
 
 
 # ───────────────────────── helpers ─────────────────────────
+
+
+def _run_one_trajectory(
+    *,
+    task_dir: str,
+    question: str,
+    llm: LLMClient,
+    config: dict,
+    task_id: str,
+    output_dir: str,
+    benchmark: str,
+    guidelines: str,
+    session_id: str,
+    traj_id: int,
+    traj_temp: float,
+) -> TaskResult | None:
+    """Run one heavy trajectory inside a worker thread.
+
+    Wrapped in try/except so a single trajectory crash doesn't kill the
+    whole heavy mode invocation — the deliberator can work with whatever
+    trajectories succeeded.
+    """
+    start = time.time()
+    try:
+        result = run_task(
+            task_dir=task_dir,
+            question=question,
+            llm=llm,
+            config=config,
+            task_id=task_id,
+            output_dir=output_dir,
+            benchmark=benchmark,
+            guidelines=guidelines,
+            session_id=session_id,
+        )
+        elapsed = time.time() - start
+        logger.info("Heavy traj %d T=%.2f done in %.1fs", traj_id, traj_temp, elapsed)
+        return result
+    except Exception as e:
+        logger.warning("Heavy trajectory %d failed: %s", traj_id, e)
+        return None
 
 
 def _trajectory_output_dir(base_output_dir: str, traj_id: int) -> str:
