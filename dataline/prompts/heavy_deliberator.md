@@ -15,59 +15,27 @@ Trajectory order is randomized to remove any position bias.
 
 {trajectories}
 
-# Default decision: keep trajectory_0's answer
-
-**Trajectory 0 is the BASELINE, sampled at temperature=0.0 (deterministic).
-It was produced by the SAME pipeline that scores ~60% accuracy by itself.
-Trajectories 1+ are higher-temperature alternates whose role is to suggest
-where baseline might be wrong — not to replace it.**
-
-Empirically, when the deliberator keeps trajectory_0, it is correct ~67%
-of the time. When it overrides to trajectory_1 or trajectory_2, accuracy
-drops to ~38–50%. So your prior must favor the baseline.
-
-**Override trajectory_0 ONLY if one of these is true:**
-
-  ✓ Trajectory 0's code has a concrete identifiable bug:
-      - referenced a wrong column / wrong table
-      - missing GROUP BY when aggregating
-      - wrong aggregate function (COUNT vs SUM vs DISTINCT)
-      - wrong join condition / wrong filter constant
-    AND another trajectory's code uses the right one.
-
-  ✓ Trajectory 0's harness has a BLOCK flag, sandbox returned non-zero,
-    or output is empty / NaN-only.
-
-  ✓ ≥2 of the other trajectories AGREE on a different answer AND their
-    code uses logic that trajectory 0 demonstrably missed (e.g., they
-    apply a filter that the question implies but trajectory 0 omitted).
-
-**Do NOT override trajectory_0 because:**
-
-  ✗ Trajectory 1 returned "more rows" or "more comprehensive" data.
-    More ≠ correct. The question may demand a narrow filter.
-  ✗ Trajectory 2's code "looks more elegant" or uses a different idiom.
-    Elegance is not correctness.
-  ✗ You think you remember the factual answer from training data
-    (e.g., "the 2009 Singapore GP was won by X"). Your factual recall
-    can be wrong; trust the SQL/Python that ran on the actual data.
-  ✗ Trajectories 1 and 2 use temperature=0.7, so their disagreement is
-    partly sampling noise. Disagreement alone is NOT evidence that
-    trajectory_0 is wrong.
-
 # Your task — five steps, in order
 
 1. **Classify the question.** Is it a count, a list, a single scalar, a
    ranked top-N, a percentage, a multi-column lookup? Different types
    imply different correct shapes.
 
-2. **Inspect trajectory_0 first.** Is its code logically sound for this
-   question? Does its output shape match what the question implies?
-   If yes → set `matched_trajectory_id: 0` and ship its answer.
+2. **Critically evaluate each trajectory's reasoning.**
+   - Does the code address the question asked? Right filters / joins /
+     aggregations / formula?
+   - Does the output shape match what the question implies?
+   - Any obvious bugs (off-by-one, wrong column, missing GROUP BY,
+     accidental row duplication from join)?
 
-3. **Only if trajectory_0 has an identifiable bug,** look at the other
-   trajectories for ONE that fixes the specific bug. Prefer the
-   minimal-change alternative.
+3. **Identify the correct answer.**
+   - If most trajectories agree AND their reasoning is sound → that is
+     likely correct.
+   - **BUT** a minority answer backed by rigorous logic may still be
+     right. Do not naively follow the majority.
+   - If ALL trajectories appear wrong, reason fresh from the question,
+     schema, and domain rules. You may write a corrected answer that
+     no trajectory produced.
 
 4. **Pick the format.** Match the column count and row shape implied by
    the question. The KDD scorer compares values per-column unordered
