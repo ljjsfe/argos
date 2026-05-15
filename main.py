@@ -25,6 +25,12 @@ def main():
     run_parser.add_argument("--output", default="./results", help="Output directory")
     run_parser.add_argument("--config", default="config.yaml", help="Config file")
     run_parser.add_argument("--benchmark", default="kdd", help="Benchmark: kdd | dabstep")
+    run_parser.add_argument(
+        "--heavy-mode",
+        choices=["auto", "always", "off"],
+        default=None,
+        help="HeavySkill heavy mode: auto (confidence-triggered) | always | off (default: config)",
+    )
 
     # --- eval: batch evaluation ---
     eval_parser = subparsers.add_parser("eval", help="Evaluate results against gold")
@@ -59,6 +65,12 @@ def main():
         type=int,
         default=None,
         help="Number of tasks to run in parallel (default: read from config.yaml batch.parallel)",
+    )
+    batch_parser.add_argument(
+        "--heavy-mode",
+        choices=["auto", "always", "off"],
+        default=None,
+        help="HeavySkill heavy mode: auto (confidence-triggered) | always | off (default: config)",
     )
 
     args = parser.parse_args()
@@ -96,21 +108,29 @@ def _cmd_run(args):
     session_id = f"single__{task_id}__{datetime.now():%Y%m%d_%H%M%S}"
 
     from dataline.core.llm_client import create_client_from_config
-    from dataline.agents.orchestrator import run_task
+    from dataline.agents.heavy_runner import run_task_heavy
     from dataline.synthesizer.base import save_prediction
 
+    # CLI --heavy-mode overrides config
+    _apply_heavy_mode_cli(config, getattr(args, "heavy_mode", None))
+
     llm = create_client_from_config(config)
+
+    heavy_active = bool((config.get("heavy_mode") or {}).get("enabled")) and (
+        (config.get("heavy_mode") or {}).get("trigger", "auto") != "off"
+    )
 
     print(f"Running task: {task_id}")
     print(f"Question: {question}")
     print(f"Model: {config['llm']['provider']}/{os.environ.get('MODEL_NAME', '') or config['llm'].get('model', '<unset>')}")
+    print(f"Heavy mode: {'ON' if heavy_active else 'OFF'}")
     print(f"Session: {session_id}")
     print()
 
     out_dir = os.path.join(args.output, task_id)
     os.makedirs(out_dir, exist_ok=True)
 
-    result = run_task(
+    result = run_task_heavy(
         task_dir=args.task,
         question=question,
         llm=llm,
@@ -215,8 +235,11 @@ def _cmd_batch(args):
     config = _load_config(args.config)
     benchmark = args.benchmark.lower()
 
+    # CLI --heavy-mode overrides config
+    _apply_heavy_mode_cli(config, getattr(args, "heavy_mode", None))
+
     from dataline.core.llm_client import create_client_from_config
-    from dataline.agents.orchestrator import run_task
+    from dataline.agents.heavy_runner import run_task_heavy as run_task
     from dataline.synthesizer.base import save_prediction
     from dataline.eval.dev_sets import get_dev_set, describe_dev_set
 
@@ -541,6 +564,23 @@ def _save_trace(result, trace_path: str) -> None:
 def _load_config(path: str) -> dict:
     with open(path) as f:
         return yaml.safe_load(f)
+
+
+def _apply_heavy_mode_cli(config: dict, mode: str | None) -> None:
+    """Apply --heavy-mode CLI flag to the loaded config (mutates in place).
+
+    None = leave config alone. "off" sets enabled=False so the wrapper is a
+    no-op. "auto"/"always" sets enabled=True with the matching trigger.
+    """
+    if mode is None:
+        return
+    hm = config.setdefault("heavy_mode", {})
+    if mode == "off":
+        hm["enabled"] = False
+        hm["trigger"] = "off"
+    else:
+        hm["enabled"] = True
+        hm["trigger"] = mode
 
 
 if __name__ == "__main__":

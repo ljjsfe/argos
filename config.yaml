@@ -28,6 +28,17 @@ eval:
   kdd_gold_dir: public
   dabstep_dir: data/dabstep
 
+heavy_mode:
+  # HeavySkill failure-triggered K-trajectory + deliberator.
+  # Reference: arXiv 2605.02396 "HeavySkill: Heavy Thinking as the Inner Skill".
+  # Default OFF for backward compatibility. Enable via CLI --heavy-mode auto
+  # or set enabled: true here.
+  enabled: false
+  trigger: auto              # auto | always | off
+  k_trajectories: 3
+  trajectory_temperatures: [0.0, 0.7, 0.7]
+  # deliberator_shuffle_seed: leave null for production; set int for repro
+
 batch:
   # Local dev (DashScope): parallel=10 tested OK on 50 KDD tasks (~25 min).
   # KDD Cup eval (internal Qwen, 16 vCPU, 64GB, 12h for ~400 tasks):
