@@ -163,46 +163,6 @@ class TestColumnCountEstimation:
         assert spec.answer_type == "list"
         assert spec.expected_column_count == 2
 
-    def test_identify_X_and_their_Y_is_multi_column(self):
-        """task_163 regression: 'Identify X and their Y' should be 2 cols,
-        not 1-col scalar. Without this fix, qa_column_count blocked the
-        correct 2-col answer (e.g. (type, total_value))."""
-        spec = analyze_deterministic(
-            "Identify the type of expenses and their total value approved for 'October Meeting' event."
-        )
-        assert spec.expected_column_count == 2
-
-    def test_identify_X_and_its_Y_is_multi_column(self):
-        spec = analyze_deterministic(
-            "Identify the company and its annual revenue."
-        )
-        assert spec.expected_column_count == 2
-
-    def test_identify_X_and_the_Y_is_multi_column(self):
-        spec = analyze_deterministic(
-            "Identify the school and the funding type from the district records."
-        )
-        assert spec.expected_column_count == 2
-
-    def test_identify_with_and_filter_does_not_increase_columns(self):
-        """False-positive guard: 'Identify patients with WBC and fibrinogen'
-        — 'with X and Y' is a filter, not a request for two output columns.
-        Must NOT be inferred as 2 cols.
-        """
-        spec = analyze_deterministic(
-            "Identify patients with normal WBC and abnormal fibrinogen."
-        )
-        # Either 1 col or 0 (unknown) — the key is NOT 2.
-        assert spec.expected_column_count in (0, 1)
-
-    def test_identify_that_and_filter_is_protected(self):
-        """Existing filter_and guard protects 'that X and Y' patterns."""
-        spec = analyze_deterministic(
-            "Identify the patient that has WBC and fibrinogen abnormal."
-        )
-        # filter_and matches 'that' → returns 0 (unknown, fail-safe)
-        assert spec.expected_column_count == 0
-
 
 class TestFailOpen:
     def test_empty_string(self):

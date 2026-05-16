@@ -284,17 +284,6 @@ def _estimate_column_count(question: str) -> int:
         r"percentage|count|sum|ratio|mean|cost|amount|value|score|age|name)\b",
         q,
         re.IGNORECASE,
-    ) or re.search(
-        # "identify X and their/its/the Y" — possessive 'their/its' or the
-        # determiner 'the' before the second noun strongly signals two output
-        # fields, distinct from "identify X with A and B" (filter).
-        # Discovered via task_163 data audit (2026-05-15): the question
-        # "Identify the type of expenses and their total value approved..."
-        # expects 2 columns (type + total) but was being inferred as 1-col
-        # scalar, causing qa_column_count to block the correct 2-col answer.
-        r"\bidentify\b[^?]*\band\s+(?:their|its|the)\b",
-        q,
-        re.IGNORECASE,
     )
     if output_and and not filter_and:
         conjunctions = re.findall(r"\band\b", q, re.IGNORECASE)
