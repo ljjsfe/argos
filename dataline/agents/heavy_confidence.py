@@ -133,51 +133,7 @@ def evaluate_confidence(
     if last_iter.get("multi_candidate_disagree"):
         reasons.append("multi_candidate_disagree")
 
-    # ── 7. Empty answer on an explicit list/which question ──
-    # Narrow rule from v77 audit: questions phrased "List X" / "Which X" /
-    # "Please list X" that return zero rows are nearly always wrong. The
-    # confident path silently shipped an empty CSV (e.g. v77 task_173 lost
-    # the Czech banking countries this way), even though v70b's heavy
-    # deliberator recovered the same task with the right answer.
-    # We DO NOT block the answer — we only downgrade confidence so that
-    # heavy mode gets a chance to retry/synthesize. Scoped tightly to
-    # explicit list-shape questions to avoid false positives on legitimate
-    # empty-set scalar answers (e.g. "how many X" where the count is 0).
-    if _is_empty_listy_answer(result):
-        reasons.append("answer_empty_for_list_question")
-
     return ConfidenceReport(len(reasons) == 0, tuple(reasons))
-
-
-_LIST_QUESTION_OPENER = (
-    "list ", "please list", "which ", "what are the", "name the",
-    "show the", "give me the", "provide the",
-)
-
-
-def _is_empty_listy_answer(result: Any) -> bool:
-    """Return True if the question explicitly asks for a list/set but the
-    final answer dict is empty or has only empty-list values.
-
-    Conservative scope:
-      - question must START with a list-shape opener (avoids triggering on
-        "Calculate ... and list" mid-sentence)
-      - answer must be present but contain no data rows
-    """
-    question = (getattr(result, "question", "") or "").strip().lower()
-    if not any(question.startswith(o) for o in _LIST_QUESTION_OPENER):
-        return False
-    answer = getattr(result, "answer", None)
-    if not isinstance(answer, dict) or not answer:
-        return False  # empty dict is captured by a different "no answer" path
-    # All columns empty → zero rows
-    for v in answer.values():
-        if isinstance(v, list):
-            if v:  # any non-empty column means we have data
-                return False
-        elif v is not None and str(v).strip():
-            return False
-    return True
 
 
 def is_confident(result: Any, max_iterations: int) -> bool:

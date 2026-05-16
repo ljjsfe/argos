@@ -14,9 +14,6 @@ class _MockResult:
     success: bool = True
     error: str = ""
     observations: dict[str, Any] = field(default_factory=dict)
-    # question + answer used by the empty-list-confidence rule (v78)
-    question: str = ""
-    answer: dict[str, Any] | None = None
 
 
 def _make_iteration(
@@ -43,19 +40,11 @@ def _make_iteration(
     }
 
 
-def _result(
-    iterations: list[dict],
-    success: bool = True,
-    error: str = "",
-    question: str = "",
-    answer: dict[str, Any] | None = None,
-) -> _MockResult:
+def _result(iterations: list[dict], success: bool = True, error: str = "") -> _MockResult:
     return _MockResult(
         success=success,
         error=error,
         observations={"iterations": iterations},
-        question=question,
-        answer=answer,
     )
 
 
@@ -237,67 +226,3 @@ def test_real_schema_finish_with_parenthetical_suffix_is_NOT_finish():
     r = _result([real_schema_iter])
     rep = evaluate_confidence(r, max_iterations=8)
     assert rep.is_confident is False
-
-
-# ─────────────── empty-list low-confidence (v78) ───────────────
-
-def test_list_question_with_empty_answer_is_not_confident():
-    """task_173 regression: 'Please list the countries...' returning an
-    empty CSV should NOT be marked confident — heavy mode should retry
-    (v70b recovered this task with CZE, SVK via heavy deliberator).
-    """
-    r = _result(
-        [_make_iteration()],
-        question="Please list the countries of the gas stations with transactions taken place in June 2013.",
-        answer={"Country": []},
-    )
-    rep = evaluate_confidence(r, max_iterations=8)
-    assert rep.is_confident is False
-    assert "answer_empty_for_list_question" in rep.reasons
-
-
-def test_which_question_with_empty_answer_is_not_confident():
-    r = _result(
-        [_make_iteration()],
-        question="Which countries had transactions in 2013?",
-        answer={"Country": []},
-    )
-    rep = evaluate_confidence(r, max_iterations=8)
-    assert rep.is_confident is False
-
-
-def test_list_question_with_populated_answer_stays_confident():
-    r = _result(
-        [_make_iteration()],
-        question="List the countries of gas stations.",
-        answer={"Country": ["CZE", "SVK"]},
-    )
-    rep = evaluate_confidence(r, max_iterations=8)
-    assert rep.is_confident is True
-
-
-def test_scalar_question_with_zero_does_not_trigger_listy_empty():
-    """Guard against false positive: 'How many X' that returns 0 is a
-    legitimate scalar answer, not an empty-list signal. Question does NOT
-    start with a list-opener, so the new rule must not fire.
-    """
-    r = _result(
-        [_make_iteration()],
-        question="How many employees joined in Q1?",
-        answer={"count": [0]},
-    )
-    rep = evaluate_confidence(r, max_iterations=8)
-    assert "answer_empty_for_list_question" not in rep.reasons
-    assert rep.is_confident is True
-
-
-def test_calculate_and_list_phrasing_does_not_trigger():
-    """Question mid-sentence containing 'list' but not starting with list
-    opener must NOT trigger (precision-biased rule)."""
-    r = _result(
-        [_make_iteration()],
-        question="Calculate the total revenue and list it.",
-        answer={"revenue": []},
-    )
-    rep = evaluate_confidence(r, max_iterations=8)
-    assert "answer_empty_for_list_question" not in rep.reasons
