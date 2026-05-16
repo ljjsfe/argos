@@ -42,9 +42,12 @@ eval:
 heavy_mode:
   # HeavySkill failure-triggered K-trajectory + deliberator.
   # Reference: arXiv 2605.02396 "HeavySkill: Heavy Thinking as the Inner Skill".
-  # Default OFF for backward compatibility. Enable via CLI --heavy-mode auto
-  # or set enabled: true here.
-  enabled: false
+  #
+  # PRODUCTION (KDD submission): enabled=true, trigger=auto.
+  # 3 same-config measurements (v75/v77/v79) on public 50 tasks:
+  #   accuracy mean 32.3 ± 0.6 (vs v68 baseline 30) → reliable +2-3 task gain
+  # KDD 400-task wall-time extrapolation: ~1.6h (well under 12h cap).
+  enabled: true
   trigger: auto              # auto | always | off
   k_trajectories: 3
   trajectory_temperatures: [0.0, 0.7, 0.7]

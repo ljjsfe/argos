@@ -53,7 +53,11 @@ def run_one(task_dir_str: str, config: dict, session_id: str) -> tuple[str, str,
             raise ValueError(f"empty question in {meta_path}")
 
         from dataline.core.llm_client import create_client_from_config
-        from dataline.agents.orchestrator import run_task
+        # Use the HeavySkill wrapper so heavy_mode.enabled=true in config.yaml
+        # activates K-trajectory + deliberation on uncertain tasks. When the
+        # flag is false, run_task_heavy degenerates to plain run_task with
+        # zero overhead. This is the production code path for v77+.
+        from dataline.agents.heavy_runner import run_task_heavy as run_task
         from dataline.synthesizer.base import save_prediction
 
         llm = create_client_from_config(config)
@@ -100,9 +104,32 @@ def main() -> int:
 
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 
-    tasks = sorted(p for p in INPUT_ROOT.iterdir()
-                   if p.is_dir() and (p / "task.json").exists())
+    # LPT (Longest Processing Time first) — sort by difficulty so the heaviest
+    # tasks start while every worker is still idle. With parallel=8 this saves
+    # ~20-30% wall time vs lexicographic order because the long-tail hard tasks
+    # no longer cluster at the end of the batch. task.json carries the
+    # difficulty label per KDD spec; unknown / missing → medium fallback.
+    _DIFF_RANK = {"extreme": 0, "hard": 1, "medium": 2, "easy": 3}
+
+    def _task_priority(task_dir: Path) -> tuple[int, str]:
+        try:
+            meta = json.loads((task_dir / "task.json").read_text(encoding="utf-8"))
+            diff = meta.get("difficulty", "medium")
+        except Exception:
+            diff = "medium"
+        return (_DIFF_RANK.get(diff, 2), task_dir.name)
+
+    tasks = sorted(
+        (p for p in INPUT_ROOT.iterdir()
+         if p.is_dir() and (p / "task.json").exists()),
+        key=_task_priority,
+    )
     print(f"[submit] {len(tasks)} tasks discovered in {INPUT_ROOT}")
+    if tasks:
+        # Show first/last 3 task IDs so the ordering is auditable in logs.
+        first_3 = [t.name for t in tasks[:3]]
+        last_3 = [t.name for t in tasks[-3:]]
+        print(f"[submit] LPT order — first 3: {first_3}  ...  last 3: {last_3}")
     if not tasks:
         print(f"[submit] WARNING: zero tasks found", file=sys.stderr)
         return 0
