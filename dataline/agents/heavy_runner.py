@@ -253,7 +253,21 @@ def run_task_heavy(
     # Strategy: keep baseline.trace + .observations (most informative — the
     # actual ReAct loop ran here), but replace `answer` with deliberator
     # output. Add a heavy_mode block to observations for telemetry.
-    final_answer = _csv_to_answer_dict(decision.final_answer_csv)
+    #
+    # Safety net (added 2026-05-16 after task_11 smoke shipped empty CSV):
+    # if the deliberator's CSV parses to an empty / all-null dict, fall back
+    # to baseline → trajectory → empty baseline (last resort) so we never
+    # write a 0-byte prediction.csv. Empty answers score 0 deterministically;
+    # baseline's actual answer can earn partial credit.
+    final_answer, answer_source = _final_answer_with_fallback(
+        decision.final_answer_csv, baseline, additional_results,
+    )
+    if answer_source != "deliberator":
+        logger.warning(
+            "Heavy mode fallback for task %s — answer_source=%s "
+            "(deliberator output was empty or unparseable)",
+            baseline.task_id, answer_source,
+        )
 
     # Persist per-trajectory predictions so debugging + post-hoc analysis
     # can see what each thinker actually proposed (the deliberator may have
@@ -274,6 +288,7 @@ def run_task_heavy(
         "trajectory_answers_distinct": _count_distinct_answers(trajectories),
         "deliberator_matched_trajectory_id": decision.matched_trajectory_id,
         "deliberator_reasoning": decision.reasoning[:500],
+        "answer_source": answer_source,
         "extra_trajectory_dirs": extra_trajectory_dirs,
         "baseline_answer_csv_preview": _answer_dict_to_csv(baseline.answer)[:1000],
         "shared_context_used_for_extra_trajectories": shared_ctx is not None,
@@ -490,6 +505,60 @@ def _count_distinct_answers(trajs: list[HeavyTrajectory]) -> int:
     """Telemetry: how many trajectories produced distinct answers?"""
     answers = {t.final_answer_csv.strip() for t in trajs}
     return len(answers)
+
+
+def _is_non_empty_answer(answer: Any) -> bool:
+    """A 'real' answer has at least one column with at least one non-null,
+    non-whitespace value.
+
+    Catches all the empty-shaped variants that would yield a 0-byte CSV
+    via pandas: {}, {"col": []}, {"col": [None]}, {"col": ["", "   "]}.
+    """
+    if not isinstance(answer, dict) or not answer:
+        return False
+    for v in answer.values():
+        if isinstance(v, list):
+            if any(x is not None and str(x).strip() for x in v):
+                return True
+        elif v is not None and str(v).strip():
+            return True
+    return False
+
+
+def _final_answer_with_fallback(
+    decision_csv: str,
+    baseline: TaskResult,
+    additional_results: list[TaskResult],
+) -> tuple[dict, str]:
+    """Pick the most usable answer with a safety chain.
+
+    KDD scorer treats an empty/unreadable prediction.csv as score 0
+    (and risks crashing the grader). On 2026-05-15 a smoke test on task_11
+    found heavy mode could emit a 0-byte CSV when the deliberator's output
+    failed to parse: baseline + 2 extras all returned garbage, deliberator
+    couldn't synthesize, save_prediction({}) → empty file. This chain
+    eliminates that class of bug.
+
+    Priority (highest-quality first):
+      1. Deliberator's parsed output — intended path.
+      2. Baseline trajectory's answer — v68-equivalent quality, may earn
+         partial credit even when wrong.
+      3. Any heavy trajectory's answer — temp=0.7 noisy but non-empty.
+      4. Baseline's (possibly empty) answer — last resort; submit_main.py's
+         file-size guard turns this into a header-only CSV.
+
+    Returns (final_answer_dict, source_label) where source_label is stored
+    in observations.heavy_mode.answer_source for post-hoc analysis.
+    """
+    parsed = _csv_to_answer_dict(decision_csv)
+    if _is_non_empty_answer(parsed):
+        return parsed, "deliberator"
+    if _is_non_empty_answer(baseline.answer):
+        return baseline.answer, "baseline_fallback"
+    for r in additional_results:
+        if _is_non_empty_answer(getattr(r, "answer", None)):
+            return r.answer, "trajectory_fallback"
+    return baseline.answer, "all_empty"
 
 
 def _save_trajectory_artifacts(

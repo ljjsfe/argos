@@ -72,6 +72,18 @@ def run_one(task_dir_str: str, config: dict, session_id: str) -> tuple[str, str,
             session_id=session_id,
         )
         save_prediction(result.answer, str(pred_path))
+        # Final safety net: guarantee a non-empty prediction.csv even when
+        # the answer dict was empty (e.g. heavy mode fallback chain
+        # exhausted). KDD scorer treats empty/unreadable predictions as 0
+        # but can also error out — a single header line is safe and
+        # deterministic.
+        try:
+            if pred_path.stat().st_size == 0:
+                pred_path.write_text("answer\n", encoding="utf-8")
+                print(f"[task {task_id}] WARNING: empty answer; wrote header-only fallback",
+                      file=sys.stderr)
+        except OSError:
+            pass
         return task_id, "ok", time.time() - start
     except Exception as exc:
         # Fail-soft: never let one task crash the whole batch.
