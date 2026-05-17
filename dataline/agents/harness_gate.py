@@ -1195,6 +1195,21 @@ def _check_where_literals(stmt, data_profile: str, flags: list[HarnessFlag]) -> 
 
 
 # ---------------------------------------------------------------------------
+# Escalation policy
+# ---------------------------------------------------------------------------
+
+# WARN-rule names eligible for orchestrator-level escalation to BLOCK
+# after ≥3 consecutive fires on different code. Read by orchestrator.py.
+# Keep this list small — escalation is a sledgehammer; only include rules
+# where repeated WARN on changing code is a strong signal of model
+# misbehavior, not legitimate WARN-then-fix iteration.
+ESCALATABLE_RULES: frozenset[str] = frozenset({
+    "agg_type",
+    "qa_column_count",  # mild extra-column violations escalate after ≥3 fires
+})
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -1211,6 +1226,11 @@ def check(
 
     Called between Sandbox and Judge in the main loop.
     Empty list → no issues, proceed to Judge normally.
+
+    Note on escalation: orchestrator.py reads `ESCALATABLE_RULES` (defined
+    above) to decide which WARN-rule names escalate to BLOCK after ≥3
+    consecutive fires. New WARN rules added here should consider whether
+    they belong in that set.
     """
     # Skip if code execution failed — debugger handles that
     if return_code != 0:

@@ -476,10 +476,9 @@ def run_task(
             weak_column_rules = {"qa_column_count", "sql_column_count"}
 
             # ── WARN escalation: whitelisted rules → BLOCK after ≥3 fires ──
-            _ESCALATION_WHITELIST = {
-                "agg_type",
-                "qa_column_count",  # mild extra-column violations escalate after ≥3 fires
-            }
+            # Source of truth is ESCALATABLE_RULES in harness_gate.py so that
+            # rule authors can see (next to the rule) whether it escalates.
+            _ESCALATION_WHITELIST = harness_gate.ESCALATABLE_RULES
             # Update counts for current warnings
             current_warn_rules = {f.rule for f in warnings}
             for rule in current_warn_rules:
