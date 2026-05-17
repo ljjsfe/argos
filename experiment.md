@@ -232,6 +232,118 @@ Next meaningful changes must either: (a) target ≥5 tasks, or (b) use repeated 
 
 ---
 
+## v7–v80 Condensed Log (2026-04-24 to 2026-05-16)
+
+Detailed per-run entries skipped during a 3-week burst. Reconstructed from `git log` + `results/eval_*/eval_report_kdd.json`. Scores below are `overall_accuracy` from the eval report. Full data in `results/`.
+
+**Eval noise floor ±4-5 tasks reconfirmed throughout.** Many "regressions" within this band are LLM variance, not code regressions.
+
+### Phase A — Post-v6 stabilization (v7–v23, 2026-04-24 to 27)
+- v7–v9 (NaN BLOCK, finalizer column trim, gate tuning) — ~58%
+- **v10–v12 DuckDB unification**: CSV/JSON/Parquet auto-registered as views, single SQL dialect across formats. v11=64%, v12=59% (shape rule regression, fixed in v13=62%)
+- **v15–v16 disaster**: aggressive prompt/rule changes collapsed to 38% then 22%. Rolled back via v17/v18 (61%)
+- v19–v23: recovery + `feat: v23 stagnation detection + missing save_result guard` (`4062f05`) → **65%**
+
+### Phase B — Surgical fixes (v24–v28, 2026-04-27 to 28)
+- **v24 FK detection fix** (`9c065f5`): camelCase columns + sequential int guard → **66%**
+- **v25 extra-column block** (`dc0a2a8`): QuestionSpec + HarnessGate upgrade → **66%** (clean)
+- v27 narrow ratio hint reverted (`dbec8c9`→`0ee9377`): overfitted to ratio questions
+- v28 confirms post-revert baseline: 62%
+
+### Phase C — Model + prompt restructure (v29–v35, 2026-04-28)
+- **Qwen 3.6 experiment**: 6258078→0299a9f reverted. Hard task collapse 63%→18%. **Locked in qwen3.5-35b-a3b**
+- v31–v34: PlannerCoder 3-step decision sequence (`f1bbc8a`), Judge formula step elevation (`3612b5f`), QuestionSpec injection (`2678f8e`) → 62-64%
+- **v35 Judge trust HarnessGate WARN rules** reverted (`728c8a3`→`09fff68`): made Judge inconsistent
+
+### Phase D — Manifest enrichment (v36–v42, 2026-04-29)
+- v36 join cardinality (1:1/1:N/N:1/N:N) in manifest (`0b7217f`) → 64%
+- v37 paired cardinality+COUNT(DISTINCT) rule reverted (`f036b06`→`b059246`) — over-constrained
+- v38 "thick Python" helpers/EDA encouragement → regression 52%
+- v39 save_result auto-expand (`bb301c8`) → recovery 60%
+- v40 targeted fixes → 65%
+- **v41 JSON view as DuckDB registration** (`9d61180`) → **peak 68%**, but v41b confirm dropped to 62% — variance
+- v42 metric_idx top-of-doc promotion (`52e56dc`) → 65%
+
+### Phase E — Voting + REPL experiments (v43–v50, 2026-04-30 to 05-01)
+- **v43 adaptive voting** reverted (`a5f5ab2`→`c7db47a`): same multi-candidate flaw as v6
+- **v44/v45 stateful Python REPL saga**: v44=16% (race conditions), v45=71% (one-off), v45b=18% (proved variance + REPL fragility), full revert in `b871de2`/`09eab`
+- v46–v48: REPL v3 + introspection + visibility, all eventually reverted (`b6d949a`)
+- **v49 column-count rule** (`fef…`) → **64%**, retained
+- v50 prompt compression reverted (`ee9aab8`→`48ed740`): lost critical guidance
+
+### Phase F — Routing + extract + audit (v51–v60, 2026-05-01 to 02)
+- v51 stdout-leak BLOCK + narrative-doc routing (`05e8ccb`) → 62%
+- **v52 EXTRACT_MAPPINGS** (`1c47a1e`→`b9690a2`) — **reverted on 1-task validation only, NO full eval**. Open question
+- v53 skeptic reintroduction reverted — confirmed still 0% effective
+- v56 OCR for safe_read_image + scanned-PDF fallback (`f7d07d0`)
+- v57 multimodal helpers + dict-string flag + stdout_leak (`cdf375b`)
+- **v58 dead code removal** (`81ee81f`): decomposer, second_opinion, error_context — net positive
+- **v59 playbook framework** (`a4c8bbf`): empty entries, fail-soft. See CLAUDE.md "Reverted Experiments" for why we don't populate it
+- v60 prompt audit cleanup (`9d100cd`) → had 2 sub-reverts; final state v60.2 = 61%
+
+### Phase G — Vision + harness verification (v61–v68, 2026-05-02 to 06)
+- **v61–v62 vision integration** (`e2248e0`+`7b53682`): `LLMClient.chat_with_image()`, integrated into PlannerCoder. First attempt collapsed (v62 vision=14%), retry v62b=66%
+- **v65 Invariant Verifier** (`dbc200b`): 3 rules added into `HarnessGate.check()` (I1 pct-range, plus 2 others) — not a separate file → 64%
+- v66 invariant pct scope + consensus severity downgrade (`8b3492b`) → 56%/60% across re-runs
+- **v68 self-initiated re-profile** (`4c3f746`): empty_output + DISTINCT probe MVP → 65%
+
+### Phase H — Heavy mode build (v69–v80, 2026-05-14 to 16)
+The big architectural shift. Built failure-triggered K-trajectory ensemble.
+
+| Commit | What | Status |
+|---|---|---|
+| `c13fb5f` | HeavyTrajectory + HeavyDecision dataclasses | retained |
+| `cf20aaa` | `is_confident()` signal | retained |
+| `836dc06` | Deliberator agent + prompt | retained |
+| `31387df` | `run_task_heavy()` wrapper + `with_temperature` | retained |
+| `ac64b40` | CLI `--heavy-mode` flag + `config.heavy_mode` | retained |
+| `cbed054` | K-1 trajectories parallel (ThreadPoolExecutor) | retained |
+| `4ae2f9b` | Persist per-trajectory artifacts for debug/fallback | retained |
+| `743c30e` | Deliberator trust-baseline bias | **REVERTED** `b424ea8` — defeats the point |
+| `37e3cb1` | Fix is_confident reads correct flat judge_action field | retained |
+| `bbc1655` | Real wall time (not sum of parallel) | retained |
+| `f4869d7`/`11c8f3a` | Share manifest + domain_rules across trajectories | retained |
+| `65a5d12` | Disable in-process REPL — pandas SIGSEGV under parallelism | retained |
+| `f2ae46e` | Answer sanity confidence signals | **REVERTED** `63995fc` — over-triggered |
+| `288a9a9` | Empty-list low-confidence trigger | **REVERTED** `f2dede0` — same family |
+| `97490ea` | identify-X-and-Y multi-column inference | **REVERTED** `6377e0b` — over-inferred 2-col |
+
+**Score landings**:
+- v70 (heavy first run, sequential) = **66%**
+- **v70b (heavy parallel) = 71%** — peak so far
+- v70c (variance check) = 66%
+- v71 trust-baseline experiment = 63% (reverted)
+- v72–v75 = 62-64% (judge fix, shared ctx tuning, subprocess sandbox)
+- v76 (answer-sanity signals) = 62% with `heavy_deliberator=4` bottleneck — signals caused over-spawn
+- v77 (revert v76) = **67%**
+- v78 (narrow fixes) = 59% (regression, reverted)
+- v79 (v77 stability re-run) = 64%
+- **v80 (fallback hardening, current head) = 66%** — `9d14f8c` adds 2-layer prediction.csv fallback
+
+### Phase I — Submission infrastructure (parallel to Phase H)
+Not eval-scored. Built during 2026-05-14 to 16:
+- `3ce23b3` KDD Cup Docker submission package
+- `4e6e8dd` parallel=8 config
+- `15344ed` remove hardcoded base_url (KDD §5.2)
+- `537cf8a` add missing critical deps to requirements.txt
+- `6694967` build_submission.sh hardening
+- `1d5a638` test_submission_locally.sh — auto-clamp CPU/mem, cp not symlink
+- `cc984df` wire heavy mode + LPT into KDD Docker entry point
+- `9d14f8c` 2-layer fallback — never ship 0-byte prediction.csv
+
+### Lessons Carried Forward (consolidate)
+
+1. **±4-5 task noise floor** holds across the entire 3-week span. Every "small win" inside that band must be assumed LLM variance until repeated.
+2. **Multi-candidate at the planner level produces no diversity** (v6, v43) — same LLM call same temp. True diversity needs independent calls = heavy mode.
+3. **Stateful Python REPL is hostile** to parallelism (pandas C ext SIGSEGV under threads). Don't retry without process isolation.
+4. **Qwen 3.6 is not a drop-in upgrade** — hard tasks collapse. Stay on qwen3.5-35b-a3b.
+5. **Most "guidance" prompt additions over-constrain** the planner (v27 ratio, v37 cardinality+COUNT(DISTINCT), v50 compression). Add structural enforcement (HarnessGate rules) instead of prose.
+6. **Heavy mode confidence signal is delicate** — multiple over-trigger reverts (v76, v288a9a9, v97490ea). Default to less-aggressive triggering.
+7. **EXTRACT_MAPPINGS revert is data-thin** — only 1-task validation. Worth re-trying with proper full eval.
+8. **Playbook is intentionally empty** — fill only from our own eval-validated patterns, never from external "universal rules" lists.
+
+---
+
 ## Baseline (v4, pre-2026-04-23)
 
 **Architecture:** Profiler → Analyzer → Loop(PlannerCoder → Sandbox → Skeptic → Judge) → Finalizer

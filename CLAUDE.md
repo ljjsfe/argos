@@ -65,7 +65,9 @@ Judge (1 LLM call, semantic verification)
 Finalizer (1 LLM call) → prediction.csv + trace.json
 ```
 
-**Current: 3-5 LLM calls per task (PlannerCoder + Judge + Finalizer, +retries).**
+**LLM calls per task:**
+- **Baseline mode**: 3-5 (PlannerCoder + Judge + Finalizer, +retries)
+- **Heavy mode (failure-triggered)**: 3K + 1 deliberator, where K=3 trajectories run in parallel at temperatures `[0.0, 0.7, 0.7]`. Triggered when baseline `is_confident()` returns False. See "Heavy Mode" below.
 
 ### Context Management
 
@@ -75,11 +77,28 @@ ContextManager (CM) assembles the PlannerCoder prompt within token budget:
 - Domain rules compiled when exceeding budget fraction (large docs)
 - Scales to large manifests and multi-iteration history without manual tuning
 
+### Heavy Mode (failure-triggered K-trajectory ensemble)
+
+Wraps `orchestrator.run_task` in `heavy_runner.run_task_heavy` (`dataline/agents/heavy_runner.py`).
+
+1. **Baseline trajectory** runs at temp=0.0.
+2. **Confidence check** — `heavy_confidence.is_confident()` reads judge action + harness state. If confident, return baseline result; no extras spawned.
+3. **K-1 extra trajectories** spawn in parallel via `ThreadPoolExecutor` (default K=3, temps `[0.0, 0.7, 0.7]`). They share the baseline's manifest + compiled domain_rules to save tokens.
+4. **Deliberator** (`heavy_deliberator.deliberate`) is 1 LLM call that picks among the K answers. Fallback when LLM parse fails: choose trajectory with longest non-empty CSV.
+
+Config in `config.yaml` under `heavy_mode`. CLI flag `--heavy-mode`. Per-trajectory artifacts persisted under `<output_dir>__heavy_t<id>/` for debugging.
+
+### Playbook (v59 framework, currently empty)
+
+`dataline/playbook/data_analysis.yaml` holds question-pattern → guidance entries (id, type, trigger, action, evidence). `dataline/playbook/loader.py` retrieves by keyword overlap, formats as advisory hints into PlannerCoder context (priority between manifest and domain_rules).
+
+**Currently `entries: []`.** Framework is fail-soft. We do NOT populate from external sources (e.g., KDD `learnings.json`) because most "universal-looking" rules are demo-shaped — see "Reverted Experiments" below. Only fill from our own eval-validated patterns.
+
 ### Extension Points
 
 The architecture extends by adding **adapters**, not LLM complexity:
-- Today: CSV, SQLite, JSON, Parquet, Markdown, PDF, DOCX, Excel, Image
-- Future: OCR for scanned tables, API connectors, streaming data, graph data
+- Today: CSV, SQLite, JSON, Parquet, Markdown, PDF, DOCX, Excel, Image (with OCR fallback)
+- Future: API connectors, streaming data, graph data
 - Structured adapters register data as DuckDB views; non-structured adapters provide Python-accessible objects
 - The core loop (profile → reason → execute → verify) stays the same
 
@@ -96,6 +115,12 @@ The architecture extends by adding **adapters**, not LLM complexity:
 | Debugger | `dataline/agents/debugger.py` | Fixes code using traceback + data context |
 | Finalizer | `dataline/agents/finalizer.py` | Formats results → prediction.csv |
 | Orchestrator | `dataline/agents/orchestrator.py` | Unified loop wiring all agents |
+| HeavyRunner | `dataline/agents/heavy_runner.py` | Failure-triggered K-trajectory wrapper around `run_task` |
+| HeavyConfidence | `dataline/agents/heavy_confidence.py` | Deterministic confidence check on baseline (judge action + harness signals) |
+| HeavyDeliberator | `dataline/agents/heavy_deliberator.py` | 1 LLM call picking among K trajectories; longest-CSV fallback |
+| Playbook | `dataline/playbook/loader.py` | Keyword-match retrieval of question-pattern guidance (entries currently empty) |
+| CodeValidator | `dataline/agents/code_validator.py` | Pre-execution static checks on planner output |
+| MetricMatcher | `dataline/agents/metric_matcher.py` | Match question to domain metrics/formulas (zero LLM) |
 
 ---
 
@@ -108,7 +133,9 @@ The architecture extends by adding **adapters**, not LLM complexity:
 | DuckDB as unified query layer | CSV, JSON, SQLite, Parquet all registered as views → single SQL dialect for everything |
 | SQL-first for structured data | Declarative and precise; LLM generates correct SQL at higher rate than pandas |
 | PlannerCoder merged | Same reasoning process shouldn't be split — avoids info loss between plan→code |
-| Multi-candidate output | LLM outputs 2-3 code candidates; try in order, first success wins (free) |
+| Multi-candidate output | LLM outputs 2-3 code candidates from ONE call; sandbox tries in order, first rc=0 wins. Cheap fallback for parse failures — NOT a true diversity mechanism (same reasoning, same temp). v6 disagreement-signal experiment proved candidates ~never disagree when both succeed |
+| Heavy mode > planner multi-candidate | True diversity needs independent LLM calls. Heavy spawns K full pipelines at different temperatures, each with independent Plan + Code + Judge + Finalize. Triggered on baseline low-confidence to cap cost |
+| Playbook stays empty until eval-validated | We do not seed it from external "universal rules" — most are demo-shaped. Only add entries with evidence from our own eval runs |
 | HarnessGate (deterministic) | 16+ rules: BLOCK (nan per-column, empty, dict, embellishment, error, excuse) + WARN (shape, agg_type, columns, SQL static) + escalation |
 | SQL static verifier (sqlglot) | AST analysis: check JOIN keys, WHERE literals vs DISTINCT, column count — 100% parse rate on DuckDB SQL |
 | NaN per-column severity | All-null/key-null → BLOCK, non-key partial → WARN — fixes false-positive BLOCKs on legitimate NULL data |
@@ -170,7 +197,10 @@ python eval/compare.py results/eval_A results/eval_B
 dataline/
 ├── core/          # types.py, llm_client.py, sandbox.py
 ├── profiler/      # manifest.py + readers (csv, sqlite, json, md, pdf, docx, excel, image, parquet)
-├── agents/        # orchestrator + agent roles (planner_coder, harness_gate, debugger, finalizer)
+├── agents/        # orchestrator, planner_coder, harness_gate, judge, debugger, finalizer,
+│                  # heavy_runner, heavy_confidence, heavy_deliberator,
+│                  # question_analyzer, metric_matcher, code_validator, analyzer
+├── playbook/      # loader.py, tracker.py, data_analysis.yaml (entries: [] — see CLAUDE.md)
 ├── synthesizer/   # base.py, normalizer.py
 ├── prompts/       # .md prompt templates per agent
 ├── eval/          # scorer, run_eval, diagnostics, failure_analysis
@@ -180,8 +210,10 @@ public/            # KDD Cup Phase 1, 50 tasks (gold answers in public/output/)
 data/
 └── dabstep/       # DABstep benchmark (Adyen payments)
 
-config.yaml        # LLM + agent + sandbox + eval config
-main.py            # CLI entry point
+config.yaml        # LLM + agent + sandbox + heavy_mode + eval config
+main.py            # CLI entry point (supports --heavy-mode)
+submit_main.py     # KDD Docker submission entry point (LPT-scheduled)
+Dockerfile         # Submission image (≤10 GB, no network at runtime)
 ```
 
 ---
@@ -194,6 +226,39 @@ main.py            # CLI entry point
 | DABstep | 10 dev + full test | Financial payments, scalar answers |
 
 Scoring: `Score = Recall − λ × (Extra Columns / Predicted Columns)`. Extra columns ARE penalized. Column names ignored; values matched by content (sorted), case-sensitive, ROUND_HALF_UP 2dp.
+
+### Current Baselines (last updated 2026-05-16)
+
+| Mode | Eval | Score | Top failure | Notes |
+|------|------|-------|-------------|-------|
+| Baseline | `eval_v80_fallback_20260516_0039` | **66%** | partial_result (9), code_error (8) | Latest stable. Judge bottleneck=4 |
+| Baseline | `eval_v77_revert_20260515_1621` | **67%** | partial_result (12), code_error (4) | Stable peak after v78 regression |
+| Heavy | `eval_v70b_heavy_parallel_20260514_2339` | **71%** | partial_result (11), code_error (4) | Heavy + parallel trajectories |
+| Heavy | `eval_v45_repl_threadlocal_20260430` | **71%** | partial_result (11), code_error (4) | Peak with stateful REPL (since reverted) |
+
+**Eval noise floor: ±4-5 tasks at temp=0** (confirmed v5f/v5g experiment). Any change targeting <5 tasks cannot be reliably measured on the 50-task eval. Either target ≥5 tasks or repeat runs.
+
+### Reverted Experiments — Do Not Re-Attempt (without new approach)
+
+| Experiment | When | Why it failed |
+|------------|------|---------------|
+| Multi-candidate disagreement signal (v6) | 2026-04-24 | Candidates from same LLM call almost never disagree when both succeed. Only 3/47 tasks had ≥2 succeeding candidates. Adds cost, zero signal. To revive: need truly independent calls (i.e., that's heavy mode) |
+| Adaptive voting (gated by complexity+uncertainty) | `a5f5ab2` → `c7db47a` | Same root cause as v6 — no real diversity to vote over |
+| EXTRACT_MAPPINGS pre-call | 2026-05-01 `1c47a1e` → `b9690a2` | Reverted on 1-task validation only, NO full eval. Status: open question — worth re-trying with proper eval before judging |
+| Stateful Python REPL (v44, v45 variants) | 2026-04-30 | Race conditions in parallel runs; pandas C ext SIGSEGV under thread parallelism. `65a5d12` disabled in-process REPL |
+| Heavy deliberator trust-baseline bias | `743c30e` → `b424ea8` | Biased deliberator toward baseline even when extras were better — defeats the point |
+| Heavy answer-sanity confidence signals | `f2ae46e` → `63995fc` | Added false-low-confidence triggers, over-spawned heavy mode |
+| Heavy empty-list low-confidence | `288a9a9` → `f2dede0` | Same family of over-triggering issues |
+| Judge "trust which HarnessGate WARN rules" | `728c8a3` → `09fff68` | Made Judge inconsistent; rule trust list ossified prompt |
+| Prompt compression (planner 90→55, judge 111→63) | `ee9aab8` → `48ed740` | Lost critical guidance, score dropped |
+| Cardinality+COUNT(DISTINCT) usage rule | `f036b06` → `b059246` | Over-constrained planner, regressed |
+| Narrow RATIO hint injection (v27) | `dbec8c9` → `0ee9377` | Overfitted to ratio questions, broke others |
+| Qwen 3.6 switch | `6258078` → `0299a9f` | Hard task accuracy collapsed 63% → 18% — Qwen 3.5 is the eval model |
+| Judge B3 broad format/unit check (v5d P1a) | 2026-04-23 | Double-edged: helped first-iter false-finishes but broke correct first-iter answers |
+| identify-X-and-Y multi-column inference | `97490ea` → `6377e0b` | Over-inferred 2-column output for single-column questions |
+| Skeptic agent (pre-v5) | 2026-04 | 0% effective on full eval, just wasted tokens |
+
+**Rule**: before proposing any of the above shapes of change, read `experiment.md` for the original failure analysis.
 
 ---
 
@@ -211,7 +276,7 @@ Source: https://dataagent.top/rules (retrieved 2026-04-25)
 | Network | **No external internet**; only internal MODEL_API_URL |
 
 ### Time Budget
-12h / 400 tasks = ~108s per task average. Current v16 architecture averages ~11s/task (2-3 LLM calls), well within budget. Room for adaptive complexity: simple tasks stay fast, complex tasks can use more iterations.
+12h / 400 tasks = ~108s per task average. Baseline mode averages well under budget. Heavy mode (K=3 parallel) adds ~1× wall time per triggered task. Submission entry point uses LPT scheduling — see `scripts/` and `submit_main.py`. Docker image built via `Dockerfile` (v3ce23b3 onwards).
 
 ### Environment Variables (injected at eval)
 ```
