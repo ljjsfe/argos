@@ -274,13 +274,13 @@ class TestNanAnswer:
     def test_warns_on_nonkey_partial_nan(self):
         """Non-key column with partial NaN → WARN (may be legitimate missing data)."""
         sj = _make_structured({
-            "school_name": ["Lincoln", "Washington"],
-            "charter_funding_type": ["Grant", "null"],
+            "entity_name": ["Alpha", "Beta"],
+            "optional_notes": ["valid", "null"],
         })
         flags = _check_nan_values(sj)
         assert len(flags) == 1
         assert flags[0].severity == "warn"
-        assert "charter_funding_type" in flags[0].message
+        assert "optional_notes" in flags[0].message
 
     def test_blocks_on_single_column_all_null(self):
         """Single column entirely null → BLOCK."""
