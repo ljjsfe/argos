@@ -33,3 +33,13 @@ run_dev_eval_complete.py
 # Claude internal
 .claude/
 KDD-Competition/
+
+# Dev / runtime artifacts (don't commit)
+*.pkl
+*.db
+.codex_checkpoints/
+dataline/playbook/difficulty_cache.json
+result.txt
+step_result.json
+team1314_v*.tar.gz
+analyze_v*.py
