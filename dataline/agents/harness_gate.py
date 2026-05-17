@@ -363,8 +363,8 @@ def _check_extra_columns(
                 severity="warn",
                 message=(
                     f"Answer contains debug/index column '{col_name}'. "
-                    f"Remove it — extra columns reduce score "
-                    f"(Score = Recall − λ×ExtraCols/PredCols)."
+                    f"Remove it — return only the columns the question "
+                    f"requests; extras dilute the answer."
                 ),
             ))
     return flags
@@ -858,9 +858,8 @@ def _check_qa_column_count(
             severity=severity,
             message=(
                 f"Expected {expected} columns but answer has {actual}. "
-                f"Extra columns ({list(answer.keys())}) reduce score "
-                f"(Score = Recall − λ×ExtraCols/PredCols). "
-                f"Return ONLY the columns the question asks for."
+                f"Extra columns ({list(answer.keys())}) — return ONLY "
+                f"the columns the question asks for."
             ),
         )]
     return []
