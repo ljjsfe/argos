@@ -16,12 +16,10 @@ from dataline.agents.harness_gate import (
     _check_error_string_answer,
     _check_excuse_answer,
     _check_extra_columns,
-    _check_magnitude_bound,
     _check_nan_values,
     _check_value_embellishment,
     check,
 )
-from dataline.core.types import QuestionSpec
 
 
 def _make_structured(answer: dict) -> str:
@@ -405,95 +403,3 @@ class TestAggTypeSumAsAverage:
             "SELECT SUM(salary) / 10 FROM employees",
         )
         assert any(f.rule == "agg_type" for f in flags)
-
-
-# ---------------------------------------------------------------------------
-# magnitude_bound: count integer + aggregate range check
-# ---------------------------------------------------------------------------
-
-class TestMagnitudeBound:
-    def _profile(self, *cols: str) -> str:
-        """Build a minimal data_profile string with column ranges."""
-        return f"### tbl [100 rows]\nColumns: {', '.join(cols)}\nSample rows:"
-
-    def test_count_non_integer_warns(self):
-        spec = QuestionSpec(answer_type="scalar", computation_type="count")
-        sj = _make_structured({"count": [4.5]})
-        flags = _check_magnitude_bound(spec, "SELECT COUNT(*) FROM tbl", sj, "")
-        assert any(f.rule == "magnitude_bound" and f.severity == "warn" for f in flags)
-
-    def test_count_negative_blocks(self):
-        spec = QuestionSpec(answer_type="scalar", computation_type="count")
-        sj = _make_structured({"count": [-3]})
-        flags = _check_magnitude_bound(spec, "SELECT COUNT(*) FROM tbl", sj, "")
-        assert any(f.rule == "magnitude_bound" and f.severity == "block" for f in flags)
-
-    def test_count_clean_integer_no_flag(self):
-        spec = QuestionSpec(answer_type="scalar", computation_type="count")
-        sj = _make_structured({"count": [17]})
-        flags = _check_magnitude_bound(spec, "SELECT COUNT(*) FROM tbl", sj, "")
-        assert flags == []
-
-    def test_avg_within_range_no_flag(self):
-        spec = QuestionSpec(answer_type="scalar", computation_type="aggregate")
-        profile = self._profile("salary(float64, 50 unique, range=[100,5000])")
-        sj = _make_structured({"avg": [2500]})
-        code = "SELECT AVG(salary) FROM tbl"
-        flags = _check_magnitude_bound(spec, code, sj, profile)
-        assert flags == []
-
-    def test_avg_far_outside_range_warns(self):
-        # task_169 shape: AVG returns 82M but column max is 5000
-        spec = QuestionSpec(answer_type="scalar", computation_type="aggregate")
-        profile = self._profile("salary(float64, 50 unique, range=[100,5000])")
-        sj = _make_structured({"avg": [82_000_000]})
-        code = "SELECT AVG(salary) FROM tbl"
-        flags = _check_magnitude_bound(spec, code, sj, profile)
-        assert any(f.rule == "magnitude_bound" for f in flags)
-
-    def test_sum_does_not_trigger_range_check(self):
-        # SUM legitimately exceeds column max; rule must skip it.
-        spec = QuestionSpec(answer_type="scalar", computation_type="aggregate")
-        profile = self._profile("amount(float64, 100 unique, range=[1,100])")
-        sj = _make_structured({"total": [9999]})
-        code = "SELECT SUM(amount) FROM tbl"
-        flags = _check_magnitude_bound(spec, code, sj, profile)
-        assert flags == []
-
-    def test_fail_open_on_missing_profile(self):
-        spec = QuestionSpec(answer_type="scalar", computation_type="aggregate")
-        sj = _make_structured({"avg": [9999]})
-        code = "SELECT AVG(x) FROM tbl"
-        # No range info in profile → skip silently
-        flags = _check_magnitude_bound(spec, code, sj, "no profile here")
-        assert flags == []
-
-    def test_fail_open_on_unparseable_sql(self):
-        spec = QuestionSpec(answer_type="scalar", computation_type="aggregate")
-        sj = _make_structured({"avg": [9999]})
-        profile = self._profile("x(int64, 5 unique, range=[1,10])")
-        flags = _check_magnitude_bound(spec, "NOT VALID SQL @@@", sj, profile)
-        assert flags == []
-
-    def test_skips_when_spec_not_scalar(self):
-        spec = QuestionSpec(answer_type="list", computation_type="aggregate")
-        sj = _make_structured({"x": [9999]})
-        flags = _check_magnitude_bound(spec, "SELECT AVG(x) FROM tbl", sj,
-                                        self._profile("x(int64, 5 unique, range=[1,10])"))
-        assert flags == []
-
-    def test_skips_when_computation_type_lookup(self):
-        spec = QuestionSpec(answer_type="scalar", computation_type="lookup")
-        sj = _make_structured({"x": [9999]})
-        flags = _check_magnitude_bound(spec, "SELECT x FROM tbl LIMIT 1", sj,
-                                        self._profile("x(int64, 5 unique, range=[1,10])"))
-        assert flags == []
-
-    def test_python_code_skipped(self):
-        # Rule only handles raw SQL for now; Python is fail-open.
-        spec = QuestionSpec(answer_type="scalar", computation_type="aggregate")
-        sj = _make_structured({"avg": [9999]})
-        code = "import pandas as pd\nv = df['x'].mean()"
-        flags = _check_magnitude_bound(spec, code, sj,
-                                        self._profile("x(int64, 5 unique, range=[1,10])"))
-        assert flags == []

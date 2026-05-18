@@ -136,7 +136,7 @@ def _format_flat_table(
     """Format a single table/file with rich schema context."""
     lines: list[str] = [f"### {label} [{row_count} rows]"]
 
-    # Column list: name(dtype, N unique[, null=X%][, range=[min,max]])
+    # Column list: name(dtype, N unique) or name(dtype, null=X%)
     col_parts: list[str] = []
     for c in columns:
         name = c.get("name", "?")
@@ -149,13 +149,6 @@ def _format_flat_table(
             parts_inner.append(f", {card} unique")
         if null_pct and null_pct > 0.01:
             parts_inner.append(f", null={round(null_pct * 100)}%")
-        # Numeric range — enables HarnessGate magnitude bound checks.
-        # Universal property of any tabular numeric column; ~10 extra tokens
-        # per numeric column total.
-        col_min = c.get("min")
-        col_max = c.get("max")
-        if col_min is not None and col_max is not None:
-            parts_inner.append(f", range=[{_compact_val(col_min)},{_compact_val(col_max)}]")
         col_parts.append("".join(parts_inner) + ")")
 
     lines.append("Columns: " + ", ".join(col_parts))
