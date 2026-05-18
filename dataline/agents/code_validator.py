@@ -35,72 +35,53 @@ _COLUMN_PATTERNS = (
 def validate_column_references(
     code: str,
     manifest: Manifest,
-) -> tuple[str, list[str], list[str]]:
+) -> tuple[str, list[str]]:
     """Check column references in generated code against manifest columns.
 
-    Phase 0.7 audit found 5/7 v80 "persistent struggle" failures had the
-    Planner ignoring a close-match suggestion (e.g., task_199 used
-    `CDSCode_str` while validator pointed at `CDSCode`). To break that
-    pattern we now split warnings into:
-
-    - **blocking_warnings**: high-confidence column typos where a close
-      match exists. Orchestrator BLOCKs execution on these — Planner
-      must use the suggested name (or rename a real column) before
-      proceeding.
-    - **soft warnings**: column not found and no close match (could be
-      a legitimate Planner-created intermediate variable). Annotated
-      into code as a comment only; execution allowed.
-
     Returns:
-        (annotated_code, all_warnings, blocking_warnings)
+        (annotated_code, warnings): Code with warning comments injected at top,
+        and list of warning strings.
     """
     referenced = extract_column_references(code)
     if not referenced:
-        return code, [], []
+        return code, []
 
     known_columns = _collect_all_columns(manifest)
     known_lower = {c.lower(): c for c in known_columns}
 
     warnings: list[str] = []
-    blocking: list[str] = []
     for col in referenced:
         if col in known_columns:
             continue
-        # Case-insensitive check — high confidence: same column, wrong case
+        # Case-insensitive check
         if col.lower() in known_lower:
             actual = known_lower[col.lower()]
-            msg = (
-                f"Column '{col}' not found exactly — did you mean '{actual}'? "
-                "(case mismatch)"
+            warnings.append(
+                f"Column '{col}' not found exactly — did you mean '{actual}'? (case mismatch)"
             )
-            warnings.append(msg)
-            blocking.append(msg)
         else:
+            # Check for close matches (simple edit distance)
             close = _find_close_matches(col, known_columns)
             if close:
-                msg = (
-                    f"Column '{col}' not found in manifest — close matches: "
-                    f"{close}. Use one of these (or explain why a new name is correct)."
-                )
-                warnings.append(msg)
-                blocking.append(msg)
-            else:
-                # Soft warning — could be a legitimate intermediate variable.
                 warnings.append(
-                    f"Column '{col}' not found in any data source "
-                    "(may be a Planner-created intermediate; verify)."
+                    f"Column '{col}' not found in manifest — close matches: {close}"
+                )
+            else:
+                warnings.append(
+                    f"Column '{col}' not found in any data source"
                 )
 
     if not warnings:
-        return code, [], []
+        return code, []
 
+    # Inject warnings as comments at top of code
     warning_block = "# === CODE VALIDATOR WARNINGS ===\n"
     for w in warnings:
         warning_block += f"# WARNING: {w}\n"
     warning_block += "# Verify column names before running. Use df.columns to check.\n"
     warning_block += "# ================================\n\n"
 
-    return warning_block + code, warnings, blocking
+    return warning_block + code, warnings
 
 
 def extract_column_references(code: str) -> list[str]:

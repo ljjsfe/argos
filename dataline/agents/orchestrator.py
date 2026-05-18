@@ -351,33 +351,18 @@ def run_task(
             winning_code = ""
             step_id = f"step_{iteration}"
 
-            # Track close-match BLOCKs across candidates — if ALL candidates
-            # have at least one blocking column typo, skip execution.
-            all_candidate_block_warnings: list[list[str]] = []
-
             for ci, candidate_code in enumerate(pc_output.candidates):
                 # Detect if candidate is raw SQL (no Python imports/statements)
                 candidate_lang = _detect_language(candidate_code, pc_output.language)
 
                 # Pre-execution validation (only for Python — raw SQL has no column refs to annotate)
-                candidate_block_warnings: list[str] = []
                 if candidate_lang == "python":
-                    annotated_code, col_warnings, blocking_warnings = validate_column_references(
+                    annotated_code, col_warnings = validate_column_references(
                         candidate_code, manifest,
                     )
                     if col_warnings:
                         _log(trace, "code_validator", f"Candidate {ci} warnings: {col_warnings}")
                         candidate_code = annotated_code
-                    candidate_block_warnings = blocking_warnings
-                all_candidate_block_warnings.append(candidate_block_warnings)
-
-                # B-fix 1 (Phase 0.7): if this candidate has a close-match
-                # typo, skip its execution. We try the next candidate.
-                if candidate_block_warnings:
-                    _log(trace, "code_validator",
-                         f"Candidate {ci} BLOCKED (close-match typo): "
-                         f"{candidate_block_warnings[0][:120]}")
-                    continue
 
                 with tracer.span("sandbox", metadata={"step_id": step_id, "candidate": ci, "lang": candidate_lang}):
                     candidate_result = sandbox.execute(
@@ -399,34 +384,6 @@ def run_task(
                     _log(trace, "sandbox",
                          f"Candidate {ci} ({candidate_lang}) failed: "
                          f"{candidate_result.stderr[:1500]}")
-
-            # B-fix 1 short-circuit: if EVERY candidate had a close-match
-            # column typo, validator already pointed at the right name(s).
-            # Skip debugger (which doesn't know about validator hints) —
-            # inject the suggestions into judge_guidance and let next iter's
-            # Planner produce code with the correct names.
-            all_blocked = (
-                bool(all_candidate_block_warnings) and
-                all(bool(b) for b in all_candidate_block_warnings) and
-                result is None
-            )
-            if all_blocked:
-                flat_warnings = [w for warns in all_candidate_block_warnings for w in warns]
-                hint_msg = (
-                    "COLUMN NAME ERRORS DETECTED IN ALL CANDIDATES — "
-                    "manifest does not contain the column(s) referenced. "
-                    "Use the suggested names below verbatim:\n"
-                    + "\n".join(f"- {w}" for w in flat_warnings)
-                )
-                _log(trace, "code_validator",
-                     f"All {len(pc_output.candidates)} candidates blocked by "
-                     f"close-match typo — skipping debugger, forcing next iter")
-                state = update_judge_guidance(state, hint_msg)
-                iter_obs["code_success"] = False
-                iter_obs["judge_action"] = "continue (validator_close_match_block)"
-                iter_obs["validator_blocked"] = True
-                obs["iterations"].append(iter_obs)
-                continue
 
             # If all candidates failed, try debugger on the first one
             if result is None or result.return_code != 0:

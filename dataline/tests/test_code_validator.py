@@ -47,34 +47,34 @@ class TestValidateColumnReferences:
     def test_all_columns_valid(self) -> None:
         manifest = _make_manifest("user_id", "status")
         code = 'df["user_id"]; df["status"]'
-        _, warnings, _blocking = validate_column_references(code, manifest)
+        _, warnings = validate_column_references(code, manifest)
         assert warnings == []
 
     def test_case_mismatch_warning(self) -> None:
         manifest = _make_manifest("Status")
         code = 'df["status"]'
-        _, warnings, _blocking = validate_column_references(code, manifest)
+        _, warnings = validate_column_references(code, manifest)
         assert len(warnings) == 1
         assert "case mismatch" in warnings[0]
 
     def test_missing_column_warning(self) -> None:
         manifest = _make_manifest("user_id")
         code = 'df["nonexistent_col"]'
-        _, warnings, _blocking = validate_column_references(code, manifest)
+        _, warnings = validate_column_references(code, manifest)
         assert len(warnings) == 1
         assert "not found" in warnings[0]
 
     def test_close_match_suggestion(self) -> None:
         manifest = _make_manifest("user_id", "user_name")
         code = 'df["user_email"]'
-        _, warnings, _blocking = validate_column_references(code, manifest)
+        _, warnings = validate_column_references(code, manifest)
         assert len(warnings) == 1
         assert "close matches" in warnings[0]
 
     def test_warning_comments_injected(self) -> None:
         manifest = _make_manifest("col1")
         code = 'df["wrong_col"]'
-        annotated, warnings, _blocking = validate_column_references(code, manifest)
+        annotated, warnings = validate_column_references(code, manifest)
         assert warnings
         assert "CODE VALIDATOR WARNINGS" in annotated
         assert code in annotated
@@ -82,7 +82,7 @@ class TestValidateColumnReferences:
     def test_no_code_modification_when_valid(self) -> None:
         manifest = _make_manifest("col1")
         code = 'df["col1"]'
-        annotated, warnings, _blocking = validate_column_references(code, manifest)
+        annotated, warnings = validate_column_references(code, manifest)
         assert annotated == code
         assert warnings == []
 
@@ -93,65 +93,5 @@ class TestValidateColumnReferences:
         )
         manifest = Manifest(entries=(entry,))
         code = 'df["id"]'
-        _, warnings, _blocking = validate_column_references(code, manifest)
+        _, warnings = validate_column_references(code, manifest)
         assert warnings == []
-
-
-# ---------------------------------------------------------------------------
-# Phase 0.7 B-fix: blocking_warnings (close-match = high-confidence typo)
-# ---------------------------------------------------------------------------
-
-class TestBlockingClosematch:
-    def _make_manifest(self, *col_names: str) -> Manifest:
-        cols = [{"name": n} for n in col_names]
-        entry = ManifestEntry(
-            file_path="t.csv", file_type="csv", size_bytes=100,
-            summary={"columns": cols},
-        )
-        return Manifest(entries=(entry,))
-
-    def test_case_mismatch_is_blocking(self):
-        manifest = self._make_manifest("CDSCode")
-        code = 'df["CDSCode_str"]'
-        _, warnings, blocking = validate_column_references(code, manifest)
-        # Substring match — close to CDSCode
-        assert any("close matches" in w.lower() or "case mismatch" in w.lower() for w in blocking)
-
-    def test_exact_case_mismatch_is_blocking(self):
-        manifest = self._make_manifest("CDSCode")
-        code = 'df["cdscode"]'
-        _, warnings, blocking = validate_column_references(code, manifest)
-        assert blocking, "case mismatch must be a blocking warning"
-        assert any("case mismatch" in w.lower() for w in blocking)
-
-    def test_close_match_is_blocking(self):
-        manifest = self._make_manifest("CDSCode", "FundingType")
-        code = 'df["CDSCode_str"]'  # close to CDSCode
-        _, warnings, blocking = validate_column_references(code, manifest)
-        assert blocking, "close-match must block"
-        assert any("CDSCode" in w for w in blocking)
-
-    def test_no_match_is_soft_warning_not_blocking(self):
-        """Column not in manifest AND no close match = likely intermediate
-        variable. Allow execution, only warn."""
-        manifest = self._make_manifest("apple", "banana")
-        code = 'df["totally_unrelated_xyz"]'
-        _, warnings, blocking = validate_column_references(code, manifest)
-        assert warnings, "should warn"
-        assert blocking == [], "no close-match → not blocking"
-
-    def test_exact_match_no_warning(self):
-        manifest = self._make_manifest("id", "name")
-        code = 'df["id"]\ndf.groupby("name")'
-        _, warnings, blocking = validate_column_references(code, manifest)
-        assert warnings == []
-        assert blocking == []
-
-    def test_mixed_some_blocking_some_soft(self):
-        manifest = self._make_manifest("CDSCode")
-        code = 'df["CDSCode_str"]; df["my_intermediate_var"]'
-        _, warnings, blocking = validate_column_references(code, manifest)
-        # First col has close match → blocking
-        # Second col has no close match → only soft warning
-        assert blocking, "CDSCode_str should block"
-        assert len(warnings) >= 1
