@@ -20,6 +20,46 @@ from ..core.token_estimator import cap_text
 from ..core.types import AnalysisState, HarnessFlag, JudgeDecision, QuestionSpec, StepRecord
 
 
+# ---------------------------------------------------------------------------
+# Selective rubric routing (Phase 2.1)
+# ---------------------------------------------------------------------------
+#
+# Phase 0.3 production-replay experiments (docs/JUDGE_REPLAY_*.md) showed
+# the rubric_v2 prompt is shape-dependent on this benchmark:
+#   - Helps on scalar/{count,aggregate,ratio} (silent catch +18/+22/+15pp,
+#     clean false-positive 0-17%).
+#   - Hurts on list/lookup (clean false-positive 43% — Judge mistakes
+#     legitimately-short list answers for "missing rows").
+#   - Neutral on scalar/lookup and unknown (limited sample).
+#
+# This routing exposes a SHAPE WHITELIST: questions whose computation_type
+# falls in the whitelist get the rubric prompt; everything else stays on
+# the baseline judge.md. The whitelist is data-driven on KDD eval and
+# should be re-tuned on any new benchmark (e.g., BIRD, Spider, DABstep).
+# Fail-open: unknown or missing computation_type → baseline prompt.
+RUBRIC_PROMPT_SHAPES: frozenset[str] = frozenset({"count", "aggregate", "ratio"})
+
+_PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
+_BASELINE_PROMPT = _PROMPTS_DIR / "judge.md"
+_RUBRIC_PROMPT = _PROMPTS_DIR / "judge_rubric_v2.md"
+
+
+def _select_prompt_path(question_spec: QuestionSpec | None) -> Path:
+    """Route to rubric prompt only on whitelisted question shapes.
+
+    Universal logic: looks only at QuestionSpec.computation_type (a benchmark-
+    neutral enum). No question text inspection, no schema dependency.
+    """
+    if question_spec is None:
+        return _BASELINE_PROMPT
+    if question_spec.computation_type in RUBRIC_PROMPT_SHAPES:
+        # Defensive: if rubric file is missing in a stripped deployment,
+        # fall back to baseline so the loop never dies on a routing decision.
+        if _RUBRIC_PROMPT.exists():
+            return _RUBRIC_PROMPT
+    return _BASELINE_PROMPT
+
+
 def evaluate(
     question: str,
     steps_done: list[StepRecord],
@@ -37,7 +77,7 @@ def evaluate(
     If state + cm are provided, uses budget-managed context via ContextManager.
     Otherwise falls back to legacy steps_done formatting.
     """
-    prompt_path = Path(__file__).parent.parent / "prompts" / "judge.md"
+    prompt_path = _select_prompt_path(question_spec)
     template = prompt_path.read_text(encoding="utf-8")
 
     # Pre-compute iteration thresholds for the template
