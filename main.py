@@ -407,7 +407,7 @@ def _batch_dabstep(args, config, run_task, save_prediction, create_client_from_c
     parallel = getattr(args, "parallel", 1)
 
     task_list = sorted(all_tasks.items(), key=lambda x: x[0])
-    print(f"[DABstep] Running {len(task_list)} tasks | {config['llm']['provider']}/{config['llm']['model']}")
+    print(f"[DABstep] Running {len(task_list)} tasks | {config['llm']['provider']}/{os.environ.get('MODEL_NAME', '') or config['llm'].get('model', '<unset>')}")
     print(f"[DABstep] Shared context dir: {context_dir}")
     print(f"[DABstep] Parallelism: {parallel}")
     print(f"[DABstep] Monitor: watch -n 5 ./monitor.sh {args.output}")
