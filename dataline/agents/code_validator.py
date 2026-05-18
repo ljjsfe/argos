@@ -55,6 +55,8 @@ def validate_column_references(
         (annotated_code, all_warnings, blocking_warnings)
     """
     referenced = extract_column_references(code)
+    if not referenced:
+        return code, [], []
 
     known_columns = _collect_all_columns(manifest)
     known_lower = {c.lower(): c for c in known_columns}
@@ -89,14 +91,6 @@ def validate_column_references(
                     "(may be a Planner-created intermediate; verify)."
                 )
 
-    # B-fix 2: detect raw json.load / open(...).read() on JSON when the
-    # helper safe_read_json_df is available but unused. Audit data
-    # (docs/AUDIT_PLANNER_CAPABILITY.md): task_163/352/418 all hand-rolled
-    # JSON parsing despite the helper being available, and all failed.
-    helper_warning = _check_raw_json_load(code)
-    if helper_warning:
-        warnings.append(helper_warning)
-
     if not warnings:
         return code, [], []
 
@@ -107,34 +101,6 @@ def validate_column_references(
     warning_block += "# ================================\n\n"
 
     return warning_block + code, warnings, blocking
-
-
-# Patterns for raw JSON loading (Planner re-implementing what
-# safe_read_json_df already does).
-_RAW_JSON_LOAD_RE = re.compile(
-    r"""(?:^|\s)(json\.load\s*\(|json\.loads\s*\(|"""
-    r"""open\s*\([^)]*\.json[^)]*\)\.read\s*\()""",
-    re.MULTILINE,
-)
-_HELPER_USED_RE = re.compile(r"\bsafe_read_json(?:_df)?\b")
-
-
-def _check_raw_json_load(code: str) -> str | None:
-    """If code uses raw json.load on a .json file but doesn't use
-    safe_read_json / safe_read_json_df, suggest the helper.
-
-    Returns a single warning string, or None if not applicable.
-    """
-    if _HELPER_USED_RE.search(code):
-        return None  # helper already in use
-    if not _RAW_JSON_LOAD_RE.search(code):
-        return None
-    return (
-        "Raw json.load detected. Use `safe_read_json_df(filename)` from "
-        "data_helpers — it auto-unwraps nested `{\"table\": ..., \"records\": [...]}` "
-        "structures into a DataFrame. Example: "
-        "`from data_helpers import safe_read_json_df; df = safe_read_json_df('context/json/foo.json')`."
-    )
 
 
 def extract_column_references(code: str) -> list[str]:
