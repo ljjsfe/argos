@@ -344,7 +344,94 @@ Not eval-scored. Built during 2026-05-14 to 16:
 
 ---
 
-## Baseline (v4, pre-2026-04-23)
+## v81 / v82 — Rubric Judge experiment series (2026-05-17) — ALL REVERTED
+
+**Goal**: Validate whether prompt-engineering Judge to be more rigorous
+(rubric-style critique with citation requirement) can lift Phase 0.3's
+measured silent-failure rate (57.5% of all eval failures).
+
+**Setup** (one full session, ~$45 LLM, 8 commits, all reverted):
+- Phase 0.1 trace mining: 4393 (eval, task) records across v5-v80
+- Phase 0.2 synthetic capability probe: P1-P5 = 100/100/40/80/80%
+- Phase 0.3 production replay harness: 80-case silent-failure dev set
+  + 40-case clean-success false-positive set (NEW: lasting asset)
+- 4 hygiene commits: stripped KDD scorer formula, fixed BLOCK contradiction,
+  centralized ESCALATABLE_RULES, neutralized KDD-named test fixture
+- Rubric prompt iterations v1 → v2
+
+**Three experiments tried and reverted**:
+
+### v81 — Wholesale `rubric_v2` swap to judge.md
+- Replay dev catch +9pp (36 → 45%), clean FP 12.5%
+- Full eval: **52.3% (-14pp vs v80 = 66%)**
+- Reverted (`cb45772`).
+- Root cause: replay set had no clean-case control, missed iteration-cost
+  amplification. False positives on clean tasks consumed all 8 iterations.
+
+### v82 — Selective rubric routing (#1) + magnitude rule (#2)
+Selective routing: `RUBRIC_PROMPT_SHAPES = {count, aggregate, ratio}`,
+non-whitelisted shapes use baseline judge.md. Magnitude rule: deterministic
+BLOCK on count<0 / non-integer, WARN on AVG/MIN/MAX out of column range.
+
+- Replay dev catch 50% (+14pp), clean FP 5% (both gates passed)
+- Full eval: **58% (-8pp vs v80)**
+- Reverted (`e0fb29b` + `a2a950e`).
+
+### Real root cause (the lesson that has lasting value)
+Diagnostic after v82 failure showed:
+- `magnitude_bound` rule **never fired** on any of 50 production tasks
+- 3 of 5 "regressions" were LLM variance (tasks unrelated to our changes)
+- 2 real regressions (task_250 aggregate, task_420 ratio) reproduced
+  rubric_v2's Mode B failure: 8 iterations all `continue`, Judge gives
+  CORRECT specific critique, Planner cannot converge
+- Same tasks in v80 baseline: **score 1.0** (baseline judge succeeded)
+
+→ The bottleneck is **Planner-Judge coupling**, not Judge quality alone:
+  - Rich, structured critique (rubric) + weak Planner = Planner fixates
+    on the specific path implied by the critique and never escapes
+  - Sparse critique (baseline) + weak Planner = Planner explores more,
+    sometimes lucky
+  - Concrete evidence: task_420 had code_validator warnings naming
+    correct close-match columns; Planner ignored them and submitted
+    code with the wrong names anyway
+
+### What we now know about Qwen 3B Judge capability (from replay data)
+- Can: integer/range/bound checks with crisp criteria → reliable
+- Cannot: judgment calls requiring evidence-weighing → either marks
+  everything n/a (cargo cult citation) or rigidly applies one rule
+  and over-rotates
+- Prompt complexity → MORE noise, not less
+
+### Decisions / DO-NOT-RE-TRY
+- Rubric-style Judge prompts (any variant) on Qwen 3B: dead-end on this
+  benchmark UNLESS Planner's response discipline improves first
+- Magnitude rule via SQL AST parsing on data_profile: too narrow to fire
+  in production (only catches obvious AVG/MIN/MAX out-of-range; real
+  failures are wrong column / wrong join / wrong filter)
+- Replay-set-only validation: insufficient. Always pair with clean-case
+  FP measurement before declaring improvement
+
+### Permanent assets from the session (NOT reverted)
+- `scripts/mine_failure_patterns.py` + `docs/FAILURE_PATTERN_LIBRARY.md`
+- `scripts/probe_qwen_capability.py` + `docs/QWEN_CAPABILITY_PROFILE.md`
+- `scripts/build_replay_set.py` + `scripts/build_clean_case_set.py`
+- `scripts/run_replay.py` + `replay_set/cases.jsonl` + `clean_cases.jsonl`
+- 4 hygiene commits in HarnessGate (KDD-specificity removal)
+- This experiment log entry
+
+### Next direction (proposed, not yet started)
+**Planner-side response discipline** — instead of improving Judge:
+- A. code_validator warnings → BLOCK (Planner must fix, not just warn)
+- B. Reflexion-style mandatory natural-language reflection on retry
+- C. Planner-side N-temp with disagreement detection
+- D. Inject close-match suggestions as priority context for next attempt
+- E. "Stuck detection" — same error 2× → force backtrack
+- Audit first (0 LLM): count v80 tasks where code_validator gave actionable
+  signal that was ignored. If ≥5, direction is justified.
+
+---
+
+
 
 **Architecture:** Profiler → Analyzer → Loop(PlannerCoder → Sandbox → Skeptic → Judge) → Finalizer
 
