@@ -260,6 +260,7 @@ Scoring: `Score = Recall − λ × (Extra Columns / Predicted Columns)`. Extra c
 | Rubric Judge wholesale swap (v81) | 2026-05-17 `3be9341` → `cb45772` | Replay catch +9pp but full eval -14pp; FP on clean tasks consumed iteration budget |
 | Rubric Judge + selective routing + magnitude rule (v82) | 2026-05-17 `8b8603b`+`a5a95f3` → `e0fb29b`+`a2a950e` | Replay catch +14pp + clean FP 5% (passed gates) but full eval -8pp; rubric still triggers Mode B on whitelisted shapes (task_250 aggregate, task_420 ratio) |
 | D7 stuck-loop detection in orchestrator (v83) | 2026-05-17 `f137381` → `7266760` | Audit-validated direction (5 failed evidence) but -6pp on full eval; D7 fired correctly but "force pivot" guidance didn't help Planner find new path |
+| B-fix 1+2 validator enforcement (v84) | 2026-05-18 `4c86aca`+`8299b75` → reverted | Enforce-existing-infra approach (close-match BLOCK + json helper recipe). -5.5pp full eval. Audit targets 0/4 recovered — Planner produced different code in v84 vs v80, validator pattern-matchers didn't fire on expected targets. Confirms audit-driven N=1 design fails to predict intervention effect across runs |
 
 **Methodology rule (forced by 3 failed v81/v82/v83 experiments)**: before proposing any new direction, run `scripts/audit_directions.py` and require ≥5 v80-task evidence. Even with that bar, full eval still gates ship — replay catch rate and clean FP rate are necessary but insufficient. Diffuse-failure pattern (LLM variance amplification) means any system change risks losing previously-passing tasks via tail-case shifts.
 

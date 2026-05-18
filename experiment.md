@@ -503,6 +503,70 @@ prompt or rule tweaks.
 
 ---
 
+## v84 — B-fix 1 + 2 validator enforcement (2026-05-18) — REVERTED
+
+**Hypothesis**: Phase 0.7+0.8 audit identified 5/7 v80 "persistent
+struggle" failures as Planner ignoring deterministic signals. B-fix 1
+BLOCKs execution on close-match column typos (5 audit cases); B-fix 2
+emits soft warning + helper recipe when Planner uses raw json.load
+(3 audit cases). Predicted recovery: 2-4 of these 7 tasks.
+
+**Implementation** (commits `4c86aca` + `8299b75`):
+- `validate_column_references` returns `(annotated_code, all_warnings,
+  blocking_warnings)`. Orchestrator skips candidates with blocking
+  warnings; if all candidates blocked, skips debugger and injects
+  close-match suggestions into `state.judge_guidance`.
+- New `_check_raw_json_load()` detects raw json.load on .json files
+  without `safe_read_json_df` import; emits SOFT warning with helper
+  recipe in code annotation.
+- 11 new tests, 294/294 + 1 skipped pass.
+
+**Result**: **60.5%** (-5.5pp vs v80=66%). Reverted (`9b19ffc` + 1 more).
+
+**B-fix actual fires in v84**:
+| B-fix | Audit predicted | Actually fired on | Recovered |
+|-------|----------------|-------------------|-----------|
+| 1 (close-match BLOCK) | task_199 | task_352, task_379 | 0 of those |
+| 2 (json recipe) | task_163, 352, 418 | task_173 | 0 of those |
+
+**Audit target recovery**: 0/4 (task_199, 163, 352, 418 all still failed).
+
+**Gains**: +1 (task_408 — unrelated to B-fix targets, LLM variance).
+**Losses**: -4 (task_11, 259, 355, 38 — all previously passing,
+diverse bottlenecks, pure LLM variance).
+
+**THE LESSON — audit-driven-tuning is fundamentally limited on
+small evals**:
+The v80-derived audit targeted Planner patterns specific to that
+single run's LLM sampling. In v84, Planner produced DIFFERENT code on
+the same tasks, so the validator's pattern-matchers didn't fire on the
+expected targets. The 4 losses are pure LLM variance.
+
+Pattern across 5 consecutive experiments:
+| Experiment | Mechanism | Δ vs v80 |
+|------------|-----------|----------|
+| v81 rubric wholesale | Judge prompt | -14pp |
+| v82 #1+#2 selective | Judge routing + magnitude | -8pp |
+| v83 D7 stuck-loop | Orchestrator control flow | -6pp |
+| **v84 B-fix 1+2** | **Validator enforcement** | **-5.5pp** |
+
+5 different mechanism types (prompt / routing / orchestrator / validator),
+5 carefully designed and tested, 5 net negative. **Diffuse-failure
+hypothesis is now strongly supported by 5 independent data points.**
+
+**Methodology constraint discovered**:
+- N=1 trace analysis (audit on a single eval) cannot reliably predict
+  intervention effect (Planner code varies across runs).
+- To use audit reliably, would need N≥3 baseline runs per direction to
+  identify which patterns reproduce.
+- That's 3x cost per audit, prohibitive at our budget.
+- Alternative: stop chasing single-point fixes on 50-task eval and pivot
+  to (a) larger eval (DABstep + KDD Phase 2 hidden), (b) heavy-mode
+  default-on (architectural override of noise), or (c) accept v80=66% as
+  the stable ceiling and ship.
+
+---
+
 ## Template (copy for each new run)
 
 ```
