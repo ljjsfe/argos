@@ -196,37 +196,30 @@ def run_one(case: dict, llm, prompt_override: str | None) -> ReplayResult:
     # template path. We do this by writing the override to a temp file and
     # patching read_text behavior. Simpler: write to dataline/prompts/judge.md
     # location is too risky. We instead use a context manager around the call.
+    prompt_path = Path(judge_agent.__file__).parent.parent / "prompts" / "judge.md"
+    original_prompt = None
     if prompt_override:
-        # Patch the path resolution inside judge.evaluate by replacing
-        # the file's content for this call.
-        prompt_path = Path(judge_agent.__file__).parent.parent / "prompts" / "judge.md"
-        original = prompt_path.read_text(encoding="utf-8")
+        original_prompt = prompt_path.read_text(encoding="utf-8")
         new_template = Path(prompt_override).read_text(encoding="utf-8")
         prompt_path.write_text(new_template, encoding="utf-8")
-        try:
-            decision = judge_agent.evaluate(
-                question=state.question, steps_done=[], llm=llm,
-                state=state, cm=cm,
-                iteration=0, max_iterations=8,
-                question_spec=spec,
-            )
-        finally:
-            prompt_path.write_text(original, encoding="utf-8")
-    else:
-        try:
-            decision = judge_agent.evaluate(
-                question=state.question, steps_done=[], llm=llm,
-                state=state, cm=cm,
-                iteration=0, max_iterations=8,
-                question_spec=spec,
-            )
-        except Exception as e:
-            return ReplayResult(
-                case_id=case["case_id"], eval_dir=case["eval_dir"], task_id=case["task_id"],
-                answer_type=case["answer_type"], computation_type=case["computation_type"],
-                original_action="finish", replay_action="error", caught=False,
-                reasoning="", error=str(e)[:200],
-            )
+
+    try:
+        decision = judge_agent.evaluate(
+            question=state.question, steps_done=[], llm=llm,
+            state=state, cm=cm,
+            iteration=0, max_iterations=8,
+            question_spec=spec,
+        )
+    except Exception as e:
+        return ReplayResult(
+            case_id=case["case_id"], eval_dir=case["eval_dir"], task_id=case["task_id"],
+            answer_type=case["answer_type"], computation_type=case["computation_type"],
+            original_action="finish", replay_action="error", caught=False,
+            reasoning="", error=str(e)[:200],
+        )
+    finally:
+        if original_prompt is not None:
+            prompt_path.write_text(original_prompt, encoding="utf-8")
 
     action = (decision.action or "continue").lower()
     return ReplayResult(
@@ -321,18 +314,31 @@ def main():
     if args.prompt_override:
         print(f"Prompt override: {args.prompt_override}")
 
+    # Incremental save path — survives crashes mid-run
+    partial_path = DOCS_DIR / f"JUDGE_REPLAY_{args.label}_partial.jsonl"
+    partial_path.parent.mkdir(parents=True, exist_ok=True)
+
     results: list[ReplayResult] = []
     t0 = time.time()
-    for i, case in enumerate(cases):
-        r = run_one(case, llm, args.prompt_override)
-        results.append(r)
-        marker = "✅" if r.caught else "—"
-        err = f" ERR:{r.error[:60]}" if r.error else ""
-        print(f"  [{i + 1:>2}/{len(cases)}] {marker} {r.case_id[-35:]:<35}  "
-              f"action={r.replay_action}{err}")
+    with partial_path.open("w") as pf:
+        for i, case in enumerate(cases):
+            r = run_one(case, llm, args.prompt_override)
+            results.append(r)
+            pf.write(json.dumps({
+                "case_id": r.case_id, "eval_dir": r.eval_dir, "task_id": r.task_id,
+                "answer_type": r.answer_type, "computation_type": r.computation_type,
+                "replay_action": r.replay_action, "caught": r.caught,
+                "reasoning": r.reasoning, "error": r.error,
+            }) + "\n")
+            pf.flush()
+            marker = "✅" if r.caught else "—"
+            err = f" ERR:{r.error[:60]}" if r.error else ""
+            print(f"  [{i + 1:>2}/{len(cases)}] {marker} {r.case_id[-35:]:<35}  "
+                  f"action={r.replay_action}{err}")
     elapsed = time.time() - t0
     print(f"\nFinished {len(cases)} cases in {elapsed:.0f}s.")
     write_report(results, args.label, elapsed, model, args.split, args.prompt_override)
+    partial_path.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
