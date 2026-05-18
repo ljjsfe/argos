@@ -257,6 +257,11 @@ Scoring: `Score = Recall − λ × (Extra Columns / Predicted Columns)`. Extra c
 | Judge B3 broad format/unit check (v5d P1a) | 2026-04-23 | Double-edged: helped first-iter false-finishes but broke correct first-iter answers |
 | identify-X-and-Y multi-column inference | `97490ea` → `6377e0b` | Over-inferred 2-column output for single-column questions |
 | Skeptic agent (pre-v5) | 2026-04 | 0% effective on full eval, just wasted tokens |
+| Rubric Judge wholesale swap (v81) | 2026-05-17 `3be9341` → `cb45772` | Replay catch +9pp but full eval -14pp; FP on clean tasks consumed iteration budget |
+| Rubric Judge + selective routing + magnitude rule (v82) | 2026-05-17 `8b8603b`+`a5a95f3` → `e0fb29b`+`a2a950e` | Replay catch +14pp + clean FP 5% (passed gates) but full eval -8pp; rubric still triggers Mode B on whitelisted shapes (task_250 aggregate, task_420 ratio) |
+| D7 stuck-loop detection in orchestrator (v83) | 2026-05-17 `f137381` → `7266760` | Audit-validated direction (5 failed evidence) but -6pp on full eval; D7 fired correctly but "force pivot" guidance didn't help Planner find new path |
+
+**Methodology rule (forced by 3 failed v81/v82/v83 experiments)**: before proposing any new direction, run `scripts/audit_directions.py` and require ≥5 v80-task evidence. Even with that bar, full eval still gates ship — replay catch rate and clean FP rate are necessary but insufficient. Diffuse-failure pattern (LLM variance amplification) means any system change risks losing previously-passing tasks via tail-case shifts.
 
 **Rule**: before proposing any of the above shapes of change, read `experiment.md` for the original failure analysis.
 
