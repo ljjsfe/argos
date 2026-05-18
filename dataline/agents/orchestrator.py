@@ -18,7 +18,6 @@ Key design (v19):
 
 from __future__ import annotations
 
-import difflib
 import json
 import logging
 import re
@@ -88,34 +87,6 @@ class TaskResult:
     # the profiler/domain compile. Excluded from repr and compare because it
     # holds live objects (Manifest) that don't serialize cleanly.
     runtime_context: Any = field(default=None, repr=False, compare=False)
-
-
-# D7 stuck-loop detection threshold (Phase 2.5).
-# A candidate that is ≥STUCK_SIMILARITY_THRESHOLD similar to a prior
-# winning code is considered a repeat. Audit data (v80): 97-100% similar
-# repeats had 100% fail rate; <95% had mixed outcomes.
-STUCK_SIMILARITY_THRESHOLD = 0.97
-
-
-def _is_stuck_candidate(
-    candidate: str,
-    prior_codes: list[str],
-    threshold: float,
-) -> bool:
-    """Return True iff `candidate` is ≥threshold similar to any prior code.
-
-    Universal: text-similarity is a benchmark-agnostic property of
-    iterative coding agents. Fail-open on empty inputs.
-    """
-    if not candidate or not candidate.strip() or not prior_codes:
-        return False
-    for prior in prior_codes:
-        if not prior:
-            continue
-        ratio = difflib.SequenceMatcher(None, candidate, prior).ratio()
-        if ratio >= threshold:
-            return True
-    return False
 
 
 def run_task(
@@ -374,38 +345,6 @@ def run_task(
             iter_obs["num_candidates"] = len(pc_output.candidates)
             iter_obs["parse_status"] = pc_output.parse_status
             iter_obs["reasoning"] = pc_output.reasoning
-
-            # ── D7 stuck-loop detection (Phase 2.5) ──
-            # If every candidate is near-identical to a prior iteration's
-            # winning code, executing them again is wasted budget. Audit on
-            # v80 (docs/AUDIT_DIRECTIONS.md): 100% similarity → 100% fail
-            # rate (task_257, task_352); 97-99% → also 100% fail
-            # (task_25, task_89). Force a pivot.
-            if pc_output.candidates and steps_done:
-                prior_codes = [s.code for s in steps_done if s.code]
-                stuck_mask = [
-                    _is_stuck_candidate(c, prior_codes, STUCK_SIMILARITY_THRESHOLD)
-                    for c in pc_output.candidates
-                ]
-                if stuck_mask and all(stuck_mask):
-                    _log(trace, "orchestrator",
-                         f"D7: all {len(pc_output.candidates)} candidates "
-                         f">={STUCK_SIMILARITY_THRESHOLD:.0%} similar to prior "
-                         "winning code — forcing pivot.")
-                    iter_obs["stuck_loop_detected"] = True
-                    iter_obs["code_success"] = False
-                    iter_obs["judge_action"] = "continue (stuck_loop_pivot)"
-                    state = update_judge_guidance(
-                        state,
-                        "STUCK LOOP DETECTED: the previous iteration's code "
-                        "was re-produced verbatim. You MUST try a "
-                        "fundamentally different approach — pick a different "
-                        "table, a different join key, a different "
-                        "aggregation, or switch SQL↔Python. Do NOT submit "
-                        "code that resembles the last attempt.",
-                    )
-                    obs["iterations"].append(iter_obs)
-                    continue
 
             # ── Execute candidates in order ──
             result: SandboxResult | None = None
