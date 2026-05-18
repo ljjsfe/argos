@@ -446,6 +446,63 @@ Diagnostic after v82 failure showed:
 
 ---
 
+## v83 — D7 stuck-loop detection (2026-05-17) — REVERTED
+
+**Hypothesis**: Phase 0.4 direction audit identified D7 (Planner submits
+≥97% similar code across iterations) as the only candidate with ≥5
+v80-task evidence (7 affected, 5 failed). Forcing pivot on detection
+should recover 2-4 tasks.
+
+**Implementation** (commit `f137381`):
+- `_is_stuck_candidate(candidate, prior_codes, threshold=0.97)` helper.
+- In orchestrator iteration loop, BEFORE candidate execution: if ALL
+  candidates match a prior winning_code ≥0.97 similarity, skip
+  execution, inject pivot guidance into `state.judge_guidance`.
+- 8 unit tests; 291/291 + 1 skipped pass.
+
+**Result**: **60.7%** (-6pp vs v80=66%). Reverted (`7266760`).
+
+**Gains (+3)**: task_243 (also won under v82 — LLM variance, not D7),
+task_257 (D7-flagged but stuck never triggered in v83; pure variance),
+task_408 (not D7-related).
+
+**Losses (-6)**: task_11, task_173, task_259, task_355, task_38, task_80
+— all previously-passing tasks newly failing; bottlenecks spread across
+unknown / sandbox / orchestrator / debugger / finalizer.
+
+**Recovery on D7 audit-flagged tasks**:
+| Task | D7 fired | v80→v83 | Outcome |
+|------|----------|---------|---------|
+| task_25  | 2 iters | 0 → 0 | No recovery despite trigger |
+| task_89  | 1 iter  | 0 → 0 | No recovery |
+| task_180 | 0       | 0 → 0 | Stuck not detected |
+| task_257 | 0       | 0 → 1 | Variance, not D7 |
+| task_352 | 0       | 0 → 0 | Stuck not detected |
+
+D7 fired correctly on task_25 + task_89 but pivot guidance did not help
+Planner find a new path. Forcing "try something different" does not
+equip Planner with WHAT to try.
+
+**Lesson — diffuse-failure hypothesis confirmed**:
+| Experiment | Mechanism | Δ vs v80 |
+|------------|-----------|----------|
+| v81 rubric wholesale | Judge prompt change | -14pp |
+| v82 #1+#2 selective | Judge routing + magnitude rule | -8pp |
+| **v83 D7** | Orchestrator control flow | **-6pp** |
+
+Three independent directions, each audit/research-validated, all net
+negative on full eval. Loss tasks shift each time (no consistent
+"regression set") — pattern consistent with LLM-variance amplification
+under system perturbation.
+
+**Conclusion**: v80 66% is the realistic ceiling for current architecture
+(single-trajectory baseline) + Qwen 3B. Single-point optimizations cannot
+break through. Productive next directions are architectural (heavy mode
+default-on, K-trajectory ensemble already proven 71% on v70b) — not more
+prompt or rule tweaks.
+
+---
+
 ## Template (copy for each new run)
 
 ```
