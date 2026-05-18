@@ -155,3 +155,53 @@ class TestBlockingClosematch:
         # Second col has no close match → only soft warning
         assert blocking, "CDSCode_str should block"
         assert len(warnings) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Phase 0.7 B-fix 2: raw json.load → suggest safe_read_json_df helper
+# ---------------------------------------------------------------------------
+
+class TestRawJsonLoadDetection:
+    def _empty_manifest(self) -> Manifest:
+        return Manifest(entries=())
+
+    def test_raw_json_load_suggests_helper(self):
+        code = """
+import json
+with open('context/json/foo.json') as f:
+    data = json.load(f)
+"""
+        _, warnings, blocking = validate_column_references(code, self._empty_manifest())
+        assert any("safe_read_json_df" in w for w in warnings)
+        # Soft warning, not blocking
+        assert blocking == []
+
+    def test_json_loads_string_also_flagged(self):
+        code = """
+import json
+data = json.loads(open('context/json/foo.json').read())
+"""
+        _, warnings, _ = validate_column_references(code, self._empty_manifest())
+        assert any("safe_read_json_df" in w for w in warnings)
+
+    def test_helper_already_used_no_warning(self):
+        code = """
+from data_helpers import safe_read_json_df
+df = safe_read_json_df('context/json/foo.json')
+"""
+        _, warnings, _ = validate_column_references(code, self._empty_manifest())
+        # No safe_read_json_df recommendation when already used
+        assert not any("Raw json.load detected" in w for w in warnings)
+
+    def test_pure_sql_code_no_warning(self):
+        code = "SELECT a FROM t"
+        _, warnings, _ = validate_column_references(code, self._empty_manifest())
+        assert warnings == []
+
+    def test_csv_only_no_json_warning(self):
+        code = """
+import pandas as pd
+df = pd.read_csv('data.csv')
+"""
+        _, warnings, _ = validate_column_references(code, self._empty_manifest())
+        assert not any("json" in w.lower() for w in warnings)
