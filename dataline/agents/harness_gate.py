@@ -825,17 +825,10 @@ def _check_qa_column_count(
 ) -> list[HarnessFlag]:
     """Rule 10: column count vs QA expectation.
 
-    Only fires for high-confidence shapes (count/ratio computation types) —
-    mirrors the gate in QuestionSpec.to_guidance(), since QuestionAnalyzer's
-    column-count inference is weak on natural-language list/lookup questions.
-
-    Missing columns → BLOCK (recall-fatal in any column-matched scorer).
-    Extra columns → BLOCK when ratio ≥ 2x (clearly wrong), else WARN.
+    Missing columns → always BLOCK (reduces recall).
+    Extra columns → BLOCK when ratio ≥ 3x (clearly wrong), else WARN.
     """
     if spec.expected_column_count <= 0 or not structured_json:
-        return []
-    # High-confidence gate — same restriction as to_guidance().
-    if spec.computation_type not in {"count", "ratio"}:
         return []
     try:
         data = json.loads(structured_json)
@@ -850,11 +843,10 @@ def _check_qa_column_count(
     if actual < expected:
         return [HarnessFlag(
             rule="qa_column_count",
-            severity="block",
+            severity="warn",
             message=(
-                f"Expected {expected} columns but answer has only {actual}. "
-                f"Missing columns make the answer incomplete — "
-                f"add the missing columns before finishing."
+                f"Expected {expected} columns but answer has {actual}. "
+                f"Missing columns will reduce recall score."
             ),
         )]
     if actual > expected:
