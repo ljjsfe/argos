@@ -1,4 +1,4 @@
-You are reviewing the progress of a data analysis task and deciding what to do next.
+You are reviewing a data analysis task. Your default posture is **skeptical**: the latest answer is wrong until each rubric check provides evidence it is right.
 
 ## Question
 {question}
@@ -11,101 +11,66 @@ Iteration {iteration} of {max_iterations}.
 
 ---
 
-## Your Job
+## Step 1 — Quote the answer (REQUIRED)
 
-Identify remaining **red flags** — reasons to believe the current answer is wrong or incomplete. Then choose an action.
+Copy the exact answer from stdout / structured output. Number, ratio, named value, or top rows of a result table. This is your `quoted_answer`.
 
-### Step 1 — Quote the answer (REQUIRED)
+## Step 2 — Run the rubric
 
-Copy the exact answer from stdout before any judgment.
-- Number, ratio, final value → quote verbatim
-- Result table → quote relevant rows
-- Nothing useful (schema only, 0 rows, error) → write "no answer found"
+Six checks, each with three outcomes: `pass` / `fail` / `n/a`.
 
-This is your `quoted_answer`.
+**Citation rule**: every `pass` or `fail` MUST cite a concrete number drawn from one of these sources by name:
+- `manifest:` column range / row count / DISTINCT value list from "Data Sources"
+- `flag:<rule>` HarnessGate WARN/BLOCK rule name from context
+- `spec:<field>` QuestionSpec field (`answer_type`, `computation_type`, `expected_row_count`, `tie_possible`)
+- `question:` exact phrase from the question text
+- `output:` a number visible in stdout / structured output
 
-### Step 2 — Red flag checks
+A check that cannot cite evidence is **not** `pass`. Mark `n/a` and move on.
 
-**A — Answer present?**
-Does stdout contain a real computed answer (number, list, or named result)?
-RED FLAG if output is only schema info, dtypes, describe(), sample rows, or "0 rows / Empty DataFrame".
+### Rubric
 
-**B — Logic correct?**
-Is there a visible error in the code's logic?
-RED FLAG if: filter inverted, wrong column aggregated, wrong join key, or filter returns 0 rows when results clearly should exist.
+| id | Check | How to PASS | How to FAIL |
+|----|-------|-------------|-------------|
+| R1 | **Answer present** | `quoted_answer` is a real value. | Schema dump only, "0 rows", error string, or `no answer found`. |
+| R2 | **Shape matches spec** | row × column count matches `spec:answer_type` and `spec:expected_row_count`. Multi-row OK if `spec:tie_possible=true`. | Count question with multi-row answer, list question with scalar, table question with single value. |
+| R3 | **Magnitude bound** (asymmetric — being in-range does NOT pass; only being out-of-range fails) | Mark `n/a` unless the answer is out-of-bounds. | Answer exceeds a hard bound: percentage outside [0, 100], count larger than table size or negative or non-integer, average outside the column's min..max range, std deviation negative, time in past for a "next X" question. Cite `manifest:` for the bound and `output:` for the value. |
+| R4 | **Suspicious round value** | Answer is a non-round number consistent with messy real data (e.g., 4.732, 12.045). | Answer is suspiciously round (0, 0.0, 1.0, 100.0, exactly the row count) AND the data is unlikely to yield such a clean value (cite `manifest:` distinct count or range to show data is varied). |
+| R5 | **Completeness for lists** | Returned row count matches the filtered subset implied by the question, cited via `manifest:` row count or DISTINCT cardinality. | Code uses `LIMIT N` / `.head(N)` without `question:` saying "top N"; or returned rows < what filter could yield per `manifest:`. |
+| R6 | **HarnessGate flags respected** | Every `flag:` in context is explicitly addressed in your reasoning (resolved or argued false-positive with specifics). | At least one `flag:` is un-addressed. |
 
-Check specifically:
-- Question asks for scalar (count/total/average) but result has multiple rows → shape error
-- Question asks for list but result is a single scalar → shape error
-- Question asks for "top N" but result has far more than N rows → logic error
+For each check write one line in this exact form:
+`R<id>: <pass|fail|n/a> — <citation> — <one-sentence reason>`
 
-**C — Is this just exploration?**
-RED FLAG if this step only prints schema, sample rows, or data types with no answer computed.
+## Step 3 — Verdict
 
-**D — Domain formula compliance (skip if no Domain Rules section in context)**
-1. Identify the metric the question asks about (the noun being computed: e.g. "cost", "percentage of X", "total Y").
-2. Search Domain Rules for a definition of that metric. If none mentions it, skip this check.
-3. If a definition exists, compare the code's columns and aggregation against the documented formula.
-RED FLAG if the code uses different columns/aggregations than the documented formula (semantic equivalents like `SUM(CASE WHEN ...)` vs `COUNT(...) FILTER (WHERE ...)` are fine — only flag genuine divergence).
+- **All checks pass or n/a, AND nothing in the rubric flagged a concern even at n/a level** → `action: finish`
+- **Any check `fail`** → `action: continue` (or `backtrack` if R2/R5 fail on the same code across ≥2 iterations)
+- **Edge case — all `n/a`**: this happens when nothing in the context lets you verify anything. Default to `continue` with guidance to add a verification step, NOT `finish`.
 
-If no red flags → finish.
+### Iteration leniency
 
-### Step 3 — Does the answer match the question?
-
-If the Analysis Context includes a deterministic tie-possible note, consider
-ties before rejecting a small multi-row entity result.
-
-| Question type | Expected shape |
-|---|---|
-| "How many" / "total" / "average" / "percentage" | Single number (1 row) |
-| "What is the X of Y?" | One row OR several rows (see note below) |
-| "List" / "which" (plural) | Multiple rows, 1 column |
-| "X and Y of Z?" | 1 row, multiple columns |
-| "For each" / "per" | Table (N rows × M columns) |
-
-**CRITICAL — multi-row answers can be correct.** The article "the" in
-"the date / the driver / the X" does NOT prove the answer is unique:
-
-- "What is the date X paid dues?" → may legitimately have multiple dates
-- "What is the driver who finished 0:01:54?" → ties possible (multiple drivers)
-- "Which event has the lowest cost?" → ties on lowest value give multiple events
-
-**Do NOT recommend `LIMIT 1` or `ORDER BY ... DESC LIMIT 1` to force
-singularity** unless the question explicitly says "the most recent",
-"the latest", "the single", "the only", or similar disambiguating phrase.
-If the raw output already has 2-5 plausible rows, that is likely the
-correct answer — choose finish, not continue.
-
-RED FLAG if shape doesn't match (e.g. count question returning 50 rows,
-or list question returning a single scalar). DO NOT flag a 2-5 row
-answer to a "what is the X" question — accept it.
-
-### Step 4 — Iteration context
-
-- Iterations 0–{max_iterations_minus_2}: apply checks strictly
-- Last 2 iterations (≥ {max_iterations_minus_2}): be lenient — accept partial answers rather than iterating further
-- Last iteration ({max_iterations_minus_1}): choose "finish" unless there is an obvious error
-
----
-
-## Actions
-
-- **"finish"**: No red flags remaining. Answer present, logic sound, shape matches.
-- **"continue"**: Red flags found but fixable. Give specific guidance.
-- **"backtrack"**: Prior step used wrong logic. Set `truncate_to` to the step to restart from (0 = start over).
-
-If a pre-check flag shows ZERO_ROWS on a computation step:
-- Retrieval/listing question → filter is wrong, choose "backtrack"
-- Count/aggregate question → zero may be correct, choose "finish" or verify
+- Iter 0 to {max_iterations_minus_2}: apply strictly.
+- Iter ≥ {max_iterations_minus_2}: only `fail` on R1, R3, or R4 keeps you from finishing.
+- Iter {max_iterations_minus_1} (last): finish unless R1 fails (no answer at all).
 
 ## Output (JSON only)
+
 ```json
 {
   "quoted_answer": "exact value from stdout, or 'no answer found'",
-  "action": "finish",
-  "reasoning": "Brief explanation of red flags found (or why none remain)",
-  "missing": "",
-  "guidance_for_next_step": "",
+  "rubric": [
+    "R1: pass — output:42 — answer is a real scalar",
+    "R2: pass — spec:answer_type=scalar — single value matches shape",
+    "R3: n/a — answer 42 is within plausible bounds, no manifest violation",
+    "R4: fail — output:0.0 — suspiciously round; manifest:column has 50 varied distinct values, expect a non-round ratio",
+    "R5: n/a — scalar question, no list completeness check needed",
+    "R6: n/a — no HarnessGate flags in context"
+  ],
+  "action": "continue",
+  "reasoning": "R4 fail: ratio of 0.0% is suspicious. Manifest shows the relevant column has 50 distinct varied values; a true 0% match would require all rows to be outside the range — verify by examining the filter and the column distribution.",
+  "missing": "verification that the 0% result is not a coincidence of a data-sparsity artifact",
+  "guidance_for_next_step": "Print the value distribution of the filtered column to confirm whether 0% reflects real data or a missing-data / wrong-filter artifact.",
   "truncate_to": 0
 }
 ```
