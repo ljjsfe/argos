@@ -1195,6 +1195,180 @@ def _check_where_literals(stmt, data_profile: str, flags: list[HarnessFlag]) -> 
 
 
 # ---------------------------------------------------------------------------
+# Magnitude bound (manifest-grounded)
+# ---------------------------------------------------------------------------
+
+# Tolerance: answer outside [min, max] by more than this factor triggers BLOCK.
+# Tuned conservative — only catches obvious magnitude errors (e.g., task_169
+# where average monthly = 82M when manifest column max is 17K).
+MAGNITUDE_TOLERANCE_FACTOR = 1.5
+
+# Regex to extract numeric column range from compressed manifest text:
+#   colname(int64, 30566 unique, range=[5,38])
+_COL_RANGE_RE = re.compile(
+    r"(\w+)\s*\([^)]*range=\[(-?[\d.eE+-]+)\s*,\s*(-?[\d.eE+-]+)\][^)]*\)"
+)
+
+
+def _extract_numeric_answer(structured_json: str) -> float | None:
+    """Pull the first numeric value from a scalar answer."""
+    if not structured_json:
+        return None
+    try:
+        data = json.loads(structured_json)
+        answer = data.get("answer", {})
+        if not isinstance(answer, dict):
+            return None
+    except (json.JSONDecodeError, ValueError):
+        return None
+    for vals in answer.values():
+        if isinstance(vals, list) and vals:
+            try:
+                return float(vals[0])
+            except (TypeError, ValueError):
+                pass
+        elif isinstance(vals, (int, float)):
+            return float(vals)
+    return None
+
+
+def _column_ranges(data_profile: str) -> dict[str, tuple[float, float]]:
+    """Parse `colname(..., range=[min,max])` patterns from the profile string.
+
+    Returns {column_name: (min, max)} for any numeric column whose range
+    survived into the compressed manifest. Fail-open: returns {} if no
+    matches.
+    """
+    out: dict[str, tuple[float, float]] = {}
+    for name, lo, hi in _COL_RANGE_RE.findall(data_profile):
+        try:
+            out[name] = (float(lo), float(hi))
+        except ValueError:
+            continue
+    return out
+
+
+def _aggregated_columns_from_sql(code: str) -> dict[str, str]:
+    """Return {column_name: agg_func_uppercase} for non-SUM aggregates.
+
+    SUM is excluded because sum across rows can legitimately exceed any
+    single column's max — checking it would be a false-positive factory.
+
+    Fail-open: returns {} if SQL parse fails or code is Python (we only
+    parse the SQL path here; Python re-execution is out of scope for this
+    rule).
+    """
+    if not code or not code.strip():
+        return {}
+    out: dict[str, str] = {}
+    try:
+        import sqlglot
+        from sqlglot import exp
+    except ImportError:
+        return {}
+    try:
+        first_line = code.lstrip().splitlines()[0].strip().upper()
+        sql_starters = ("SELECT", "WITH", "INSERT", "UPDATE", "DELETE")
+        if not any(first_line.startswith(k) for k in sql_starters):
+            # Python code — we only handle direct SQL for now. Python
+            # aggregation could be covered later via pandas-AST parsing.
+            return {}
+        tree = sqlglot.parse_one(code, dialect="duckdb")
+    except Exception:
+        return {}
+    if tree is None:
+        return {}
+    for node in tree.find_all((exp.Avg, exp.Min, exp.Max)):
+        col_node = node.this
+        if isinstance(col_node, exp.Column):
+            col_name = col_node.name
+            if col_name:
+                out[col_name] = type(node).__name__.upper()
+    return out
+
+
+def _check_magnitude_bound(
+    spec: QuestionSpec,
+    code: str,
+    structured_json: str,
+    data_profile: str,
+) -> list[HarnessFlag]:
+    """Universal magnitude bound check (manifest-grounded).
+
+    Two independent checks, gated by QuestionSpec.computation_type:
+
+    1. COUNT answers: must be a non-negative integer.
+       (Scope larger than `_check_scalar_range`'s count branch because we
+        gate on spec instead of question keywords — G2.3.)
+
+    2. AGGREGATE answers from AVG/MIN/MAX over a single column: must lie
+       within that column's [min, max] (with `MAGNITUDE_TOLERANCE_FACTOR`).
+       SUM is excluded by design (sum across rows can exceed column max).
+
+    Fail-open everywhere: missing spec, no parseable SQL, no matching
+    column in profile → return []. Universal: no question-text keyword
+    matching, no KDD-specific schema assumptions.
+    """
+    if spec.answer_type != "scalar":
+        return []
+    if spec.computation_type not in {"count", "aggregate"}:
+        return []
+    value = _extract_numeric_answer(structured_json)
+    if value is None:
+        return []
+
+    flags: list[HarnessFlag] = []
+
+    # Count must be integer ≥ 0
+    if spec.computation_type == "count":
+        if value < 0:
+            flags.append(HarnessFlag(
+                rule="magnitude_bound",
+                severity="block",
+                message=f"Count question but answer is negative ({value}).",
+            ))
+        elif value != int(value):
+            flags.append(HarnessFlag(
+                rule="magnitude_bound",
+                severity="warn",
+                message=(
+                    f"Count question but answer is non-integer ({value}). "
+                    "A count of distinct entities should always be a whole number."
+                ),
+            ))
+        return flags
+
+    # Aggregate: AVG/MIN/MAX bound check
+    aggregated = _aggregated_columns_from_sql(code)
+    if not aggregated:
+        return flags  # cannot determine which column was aggregated → skip
+
+    col_ranges = _column_ranges(data_profile)
+    if not col_ranges:
+        return flags  # manifest lacks range info → skip
+
+    for col_name, agg in aggregated.items():
+        rng = col_ranges.get(col_name)
+        if rng is None:
+            continue
+        lo, hi = rng
+        span = hi - lo
+        tol_lo = lo - span * (MAGNITUDE_TOLERANCE_FACTOR - 1.0)
+        tol_hi = hi + span * (MAGNITUDE_TOLERANCE_FACTOR - 1.0)
+        if value < tol_lo or value > tol_hi:
+            flags.append(HarnessFlag(
+                rule="magnitude_bound",
+                severity="warn",
+                message=(
+                    f"{agg}({col_name}) answer {value} is outside the column's "
+                    f"plausible range [{lo}, {hi}] (× {MAGNITUDE_TOLERANCE_FACTOR} tol). "
+                    f"The aggregation may be over the wrong column or use the wrong operator."
+                ),
+            ))
+    return flags
+
+
+# ---------------------------------------------------------------------------
 # Escalation policy
 # ---------------------------------------------------------------------------
 
@@ -1258,6 +1432,7 @@ def check(
     # QA-spec checks
     flags.extend(_check_qa_column_count(spec, structured_json))
     flags.extend(_check_scalar_range(spec, question, structured_json, data_profile))
+    flags.extend(_check_magnitude_bound(spec, code, structured_json, data_profile))
 
     # Tie-possible check
     flags.extend(_check_tie_possible(spec, question, code, structured_json))
