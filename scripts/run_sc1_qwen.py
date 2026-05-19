@@ -45,6 +45,48 @@ SYSTEM_PROMPT = textwrap.dedent(
     to run as-is."""
 )
 
+# SC1-C3: same skeleton (C2 reused), but augmented with universal self-verify
+# requirements. Phrasing is intentionally universal (no task-specific column
+# names, no failure-mode-specific hints) so that any benefit transfers.
+SYSTEM_PROMPT_C3 = textwrap.dedent(
+    """\
+    You are a senior data engineer completing a Python script.
+
+    The user will give you:
+    - A natural-language question.
+    - A Python SKELETON containing imports, data loads, probe prints, and
+      `# TODO:` comments next to placeholder variables (assigned to None).
+
+    Your job: fill in the TODO sections so the script computes the correct
+    answer to the question and writes prediction.csv. Do NOT change imports,
+    paths, or the PROBE block. Do NOT add new imports.
+
+    DEFENSIVE WRITING REQUIREMENTS (apply throughout):
+    1. Before relying on any column, confirm its dtype matches the literal
+       you compare against. If the column is int, compare to int; if str,
+       compare to str.
+    2. After each filter or merge step, sanity-check the result shape: if
+       the filter likely should leave rows but produced 0, the literal or
+       dtype is wrong — adjust and retry inside the script using a fallback
+       branch.
+    3. When the question uses a domain term that does not match any column
+       name verbatim, look at the PROBE output and pick the column whose
+       semantics (not whose spelling) matches the question.
+    4. When parsing free-form text with regex, the capture-group count and
+       the match precision matter — verify your regex has at least one
+       sample match by inspecting probe-visible text BEFORE relying on
+       `.group(N)`.
+    5. Before writing prediction.csv, print the final answer and a one-line
+       sanity check (e.g. row count, value range) so a reader can confirm
+       it is in the expected ballpark.
+
+    These are universal small-model failure modes; spending the extra lines
+    is strictly cheaper than getting the answer wrong.
+
+    Output ONLY a complete Python script (no markdown, no commentary), ready
+    to run as-is."""
+)
+
 
 def build_user(question: str, skeleton: str, probe_output: str = "") -> str:
     probe_section = ""
@@ -99,7 +141,7 @@ def extract_code(text: str) -> str:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--arm", choices=["C1", "C2"], required=True)
+    ap.add_argument("--arm", choices=["C1", "C2", "C3"], required=True)
     ap.add_argument("--tasks", default="86,163,180,344,352,418")
     args = ap.parse_args()
 
@@ -111,8 +153,14 @@ def main():
     print(f"Arm {arm}, tasks: {tasks}, model: {client._config.model}")
 
     rows = []
+    # C3 reuses C2 skeletons but augments the system prompt with universal
+    # self-verify instructions. Both skeleton lookup and the system prompt
+    # vary by arm.
+    skeleton_arm = "C2" if arm == "C3" else arm
+    system_prompt = SYSTEM_PROMPT_C3 if arm == "C3" else SYSTEM_PROMPT
+
     for tid in tasks:
-        skeleton_path = REPO / f"eval_split/skeletons/task_{tid}_{arm}.py"
+        skeleton_path = REPO / f"eval_split/skeletons/task_{tid}_{skeleton_arm}.py"
         if not skeleton_path.exists():
             print(f"  task_{tid}: SKIP — no skeleton")
             rows.append((tid, "SKIP", None))
@@ -130,13 +178,17 @@ def main():
             probe_out = ""
         print(f"  task_{tid}: calling Qwen (probe={len(probe_out)} chars) ...", flush=True)
         try:
-            response = client.chat(SYSTEM_PROMPT, build_user(question, skeleton, probe_out))
+            response = client.chat(system_prompt, build_user(question, skeleton, probe_out))
         except Exception as e:
             print(f"    LLM error: {e}")
             rows.append((tid, "LLM_ERROR", None))
             continue
 
         code = extract_code(response)
+        # C3 reuses C2 skeletons; rewrite the output-dir path so C3 predictions
+        # land in _pred_task_X_C3/, not _pred_task_X_C2/ (would overwrite C2).
+        if arm == "C3":
+            code = code.replace(f"_pred_task_{tid}_C2", f"_pred_task_{tid}_C3")
         out_path = REPO / f"eval_split/skeletons/task_{tid}_{arm}_output.py"
         out_path.write_text(code)
 

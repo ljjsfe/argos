@@ -97,6 +97,44 @@ decomposition + TODO expression placeholders. Probe output appended to prompt.
 
 Net Qwen-attributable: 1/5 PASS (task_344 excluded — data gap).
 
+## SC1-C3 — Qwen + logic skeleton + self-verify system prompt
+
+Same C2 skeletons; system prompt augmented with universal self-verify
+requirements (dtype-match-literal, post-filter shape sanity, semantic
+not spelling, regex sample-match check, final-answer sanity print).
+
+| task | score | failure mode |
+|---|---|---|
+| task_86 | EXEC_FAIL | added defensive code, but still mapped "track number" → drivers.number; crashed on `int(NaN)` |
+| task_163 | 1.0 | ✓ |
+| task_180 | 0.0 | Qwen wrote dtype checks for ProductID/CustomerID but still wrote `Date == '201208'` (string literal); fallback only flipped CustomerID type, not Date |
+| task_344 | 0.0 | data gap (NOT Qwen failure) |
+| task_352 | EXEC_FAIL | regex group index error (same shape as C2) |
+| task_418 | 0.0 | regex too loose; count over-shot |
+
+**Score-≥0.9 pass count: 1/6**.
+
+Net Qwen-attributable: 1/5 PASS — identical to C2.
+
+**Critical finding: self-verify prompting alone does NOT close the gap.**
+Qwen *partially applies* the universal self-check rules (dtype checks
+appeared in some places) but does not apply them uniformly. The fundamental
+semantic-mapping error (task_86) is unchanged by self-check because the
+self-check starts from the wrong column choice. Regex completeness errors
+(task_352) recur identically.
+
+## Cumulative reading
+
+| arm | Qwen-attributable pass | what it tested | result |
+|---|---|---|---|
+| C1 | 0/5 | discovery / invocation | not the gap |
+| C2 | 1/5 | decomposition outline | not the gap |
+| C3 | 1/5 | self-verify prompting | not the gap |
+
+3 different *prompt-level* interventions, same ceiling = 1/5.
+
+**The path forward must be infrastructure-level, not prompt-level.**
+
 ## Headline decision-matrix reading
 
 | arm | pass | Qwen-attributable pass |
