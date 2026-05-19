@@ -567,6 +567,86 @@ hypothesis is now strongly supported by 5 independent data points.**
 
 ---
 
+## v85/v86 — Input Hygiene + True Baseline (2026-05-19) — SHIPPED
+
+### Discovery
+
+Phase 0 V trace audit found Qwen reading `result.json`, `step_result.json`,
+`intermediate_*.pkl` etc. from `public/input/task_*/` directories — files left
+behind by prior eval runs that had written into TASK_DIR. N1 scan: 23/50
+tasks had such artifacts.
+
+Smoking gun: greps over `results/eval_v32*+/task_*/workspace/steps/`
+showed Qwen code calling `open('.../public/input/.../output/result.json', 'w')`
+since v32 (Apr 28). Self-reinforcing pollution loop confirmed.
+
+### What shipped
+
+| layer | commit | purpose |
+|---|---|---|
+| L1 prompt declares TASK_DIR read-only | `f2539de` | prevention |
+| L2 Sandbox snapshot+detect+delete TASK_DIR writes | `20e4f8f` | enforcement |
+| L3 Profiler output-convention blacklist + empty-DB detection | `d009c1d` | containment |
+| L4 one-shot clean-up of 37 leaked files across 23 tasks | `20e4f8f` (script) | reset |
+
+24 unit tests; full suite 307 pass.
+
+### True baseline measurement (CRITICAL)
+
+| eval | input | code | avg | ≥0.9 pass |
+|---|---|---|---|---|
+| v80 | polluted (had leaks) | original | **0.660** | 33/50 |
+| v85 | polluted | + S1 (L3) only | 0.630 | 31/50 |
+| v86 | **clean (post-L4)** | + L1+L2+L3 | **0.620** | 31/50 |
+
+**The true baseline of our agent on clean Phase-2-equivalent input is 62%,
+not 66%.** v80 = 66% was inflated by ~4pp from leak-derived signals
+(filename hints like `severe_thrombosis_patients.csv` told Qwen the filter
+condition).
+
+### Implication for past reverted experiments
+
+Every prior experiment was paired-evaluated against v80's inflated 66%.
+A real +2pp improvement showed as -2pp when it conflicted with the
+leak benefit. **Several reverted experiments may have been false negatives**:
+
+| candidate for re-eval | revert SHA | why suspect |
+|---|---|---|
+| EXTRACT_MAPPINGS | `1c47a1e` → `b9690a2` | only 1-task validation, no full eval; same direction as H1 |
+| identify-X-and-Y multi-column | `97490ea` → `6377e0b` | could've conflicted with leak schema hints |
+| Cardinality+COUNT(DISTINCT) | `f036b06` → `b059246` | constrained SQL, leak benefit guided different SQL |
+
+These deserve re-test against the v86 clean baseline before being permanently
+dismissed.
+
+### Lift signals (v80 → v86)
+
+- task_408 0→1.0: empty-DB metadata works (Profiler now tags races.db /
+  circuits.db / etc. as `empty=True` so PlannerCoder skips them).
+- task_243 0→1.0: possible variance, not necessarily structural.
+
+### Regression sources (v80 → v86)
+
+- task_11 1→0: filename hint loss (`severe_thrombosis_patients.csv` previously
+  told Qwen to filter `Thrombosis = severe`).
+- task_173 1→0: v80's score came from heavy_t2 saving a timed-out baseline;
+  v86 didn't get the same lucky variance.
+- task_196 1→0, task_22 1→0: pure LLM variance (no leaks affected, also
+  passed in v85). Within ±4-5 noise band.
+
+### Honest position
+
+True capability ≈ 62%, not 66%. Phase 2 submission expectation should be
+calibrated against 62%. Any new direction needs to lift above this baseline.
+
+Next-iteration substrate is in `docs/LEAK_TO_HONEST_INFO_MAP.md`:
+- H1 (question entity → manifest match) — prototype works on task_352
+- knowledge.md term-column binding — surfaces "Thrombosis=2 means severe"
+  etc. that filename hints used to imply
+- QuestionSpec output-column-names inference
+
+---
+
 ## Phase 0 v3 Plan — Helpers / Decomposition Diagnostic (2026-05-18)
 
 Adopted after red-team review of v3 matrix plan. **No code change yet** — this is the diagnostic gate that decides whether Phase 1 helper investment is justified.
