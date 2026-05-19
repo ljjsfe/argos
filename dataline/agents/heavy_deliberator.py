@@ -34,6 +34,74 @@ _MAX_ANSWER_CHARS = 1500
 _MAX_REASONING_CHARS = 500
 
 
+def _normalize_csv(text: str) -> str:
+    """Canonical form for comparing two CSV answers.
+
+    Mirrors the official KDD scorer behaviour: column NAMES are ignored,
+    only the per-column data value sets matter. We canonicalise by:
+      1. drop the header row
+      2. sort data rows
+      3. lower-case + strip cells; numeric cells round to 2dp
+      4. include the column count so a 1-col answer can't accidentally
+         match a 2-col one with the same values
+
+    Empty answer → "" (cannot win the majority).
+    """
+    if not text or not text.strip():
+        return ""
+    lines = [ln.rstrip() for ln in text.strip().splitlines() if ln.strip()]
+    # Need at least header + 1 data row, OR a single header-only line is
+    # treated as no-data.
+    if len(lines) < 2:
+        return ""
+    data_rows = lines[1:]
+    if not data_rows:
+        return ""
+    # Determine column count from the first data row (consistent across CSV).
+    n_cols = len(data_rows[0].split(","))
+    norm_rows: list[str] = []
+    for row in data_rows:
+        cells = []
+        for cell in row.split(","):
+            c = cell.strip().lower()
+            try:
+                cells.append(f"{round(float(c), 2):.2f}")
+            except ValueError:
+                cells.append(c)
+        norm_rows.append(",".join(cells))
+    norm_rows.sort()
+    return f"cols={n_cols}\n" + "\n".join(norm_rows)
+
+
+def _majority_vote(trajectories: list[HeavyTrajectory]) -> "HeavyTrajectory | None":
+    """If a strict majority of trajectories share the same normalized answer,
+    return one of them. Otherwise return None (fall through to LLM).
+
+    Strict majority = > K/2 (so for K=3 this is ≥2). Empty-answer signatures
+    are skipped — only non-empty candidates can win.
+
+    This is a UNIVERSAL deterministic safeguard: when 2+ independent
+    trajectories converge on the same answer, that signal is stronger than
+    any single-LLM-call deliberation. Catches the deliberator-prior-override
+    failure observed on task_415 (Brawn vs McLaren) etc.
+    """
+    if not trajectories:
+        return None
+    sig_to_trajs: dict[str, list[HeavyTrajectory]] = {}
+    for t in trajectories:
+        sig = _normalize_csv(t.final_answer_csv)
+        if not sig:
+            continue
+        sig_to_trajs.setdefault(sig, []).append(t)
+    threshold = len(trajectories) // 2 + 1  # strict majority
+    for sig, ts in sig_to_trajs.items():
+        if len(ts) >= threshold:
+            # Prefer the lowest temperature among matching trajectories
+            # (typically the baseline) for stability.
+            return min(ts, key=lambda t: (t.temperature, t.traj_id))
+    return None
+
+
 def deliberate(
     question: str,
     trajectories: list[HeavyTrajectory],
@@ -68,6 +136,26 @@ def deliberate(
             reasoning="no trajectories provided",
             matched_trajectory_id=-1,
             trajectories_seen=0,
+        )
+
+    # ── Deterministic safeguard: strict-majority vote ─────────────────────
+    # When ≥ ⌊K/2⌋+1 trajectories converge on the same normalized answer,
+    # trust that consensus instead of calling the LLM deliberator. Catches
+    # the deliberator-prior-override failure mode where an LLM call can
+    # invent training-data "knowledge" that contradicts what the data
+    # actually shows (e.g. inventing a sports-history fact that overrides
+    # 2/3 correct trajectories).
+    majority = _majority_vote(trajectories)
+    if majority is not None:
+        return HeavyDecision(
+            final_answer_csv=majority.final_answer_csv,
+            reasoning=(
+                f"majority_vote: ≥{len(trajectories)//2 + 1}/{len(trajectories)} "
+                f"trajectories converged on traj_id={majority.traj_id}'s answer; "
+                f"deterministic agreement trusted over LLM deliberation."
+            ),
+            matched_trajectory_id=majority.traj_id,
+            trajectories_seen=len(trajectories),
         )
 
     template = (prompt_path or _DEFAULT_PROMPT).read_text(encoding="utf-8")
