@@ -1,0 +1,9 @@
+# Phase 0 holdout set — 5 stable-failure tasks (frozen 2026-05-18)
+# DO NOT READ TRACE. DO NOT WRITE REFERENCE CODE. DO NOT INSPECT INTERMEDIATE OUTPUT.
+# Used solely to detect overfitting at Phase 1 ship gate.
+# Stratified split: 1 easy + 2 medium + 2 hard.
+task_89
+task_199
+task_257
+task_379
+task_396

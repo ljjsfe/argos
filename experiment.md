@@ -567,6 +567,54 @@ hypothesis is now strongly supported by 5 independent data points.**
 
 ---
 
+## Phase 0 v3 Plan — Helpers / Decomposition Diagnostic (2026-05-18)
+
+Adopted after red-team review of v3 matrix plan. **No code change yet** — this is the diagnostic gate that decides whether Phase 1 helper investment is justified.
+
+### Frozen artifacts (locked before any experiment)
+
+| Artifact | Path | Purpose |
+|---|---|---|
+| Train set (8) | `eval_split/train_8.txt` | May inspect trace + derive helpers |
+| Holdout set (5) | `eval_split/holdout_5.txt` | Names only; never read trace |
+| Taxonomy snapshot | `eval_split/TAXONOMY_SNAPSHOT.md` → SHA `43ad212` | Phase 1B may only reference this SHA |
+| Skeleton rubric | `eval_split/SKELETON_RUBRIC.md` | Locks C1/C2 boundary before skeletons are written |
+
+### Phase 0 items
+
+| Item | What | Cost | Risk | Gate |
+|---|---|---|---|---|
+| P0-1 SC1-A | Opus + helpers reference code on 5-6 train tasks | Opus, 3h | 🟢 | Score≥0.9 of ≥4/6 |
+| P0-2 SC1-B | Opus pure SQL/pandas (no helpers) | Opus, 1h | 🟢 | gap vs A judges helper value |
+| P0-3 SC1-C1 | Qwen + API skeleton (per rubric) | ~$2, 1h | 🟢 | C1≈A → discovery gap |
+| P0-4 SC1-C2 | Qwen + logic skeleton (per rubric) | ~$2, 1h | 🟡 | C2≈A & C1<<A → decomp gap |
+| P0-5 | Trace attribution v81/v82/v83 magnitude rule | 0, 1h | 🟢 | Unlocks/blocks P3.1 |
+
+### Phase 0 Decision Matrix
+
+| A | B | C1 | C2 | Interpretation | Next |
+|---|---|---|---|---|---|
+| ≥4/6 | <A | ≈A | — | discovery gap | P1A + P1C |
+| ≥4/6 | <A | <<A | ≈A | decomposition gap | P1A + scoped P2A |
+| ≥4/6 | <A | <<A | <<A | reasoning/impl gap | P2A first |
+| ≥4/6 | ≈A | — | — | helpers convenience only | skip P1B |
+| ≥4/6 | ≥A | — | — | helpers actively hurt | audit existing helpers |
+| <4/6 | — | — | — | taxonomy insufficient | redesign taxonomy |
+| mixed | — | — | — | unclear | small P1A + P2A probe |
+
+### Ship rule (each Phase 1+ ship)
+
+- paired eval: `newly_fixed - regressions ≥ 2` OR overall Δ ≥+1.5pp
+- holdout regression = 0 (else flag overfit, no ship)
+- latency/cost: no unacceptable growth
+- per-phase rollback: independent commit/flag
+
+### Stop-loss
+
+Phase 0 + Phase 1 total budget ≤ **$30** + ≤ **5 working days**. Over budget with holdout flat → abandon helper direction; re-audit from Phase 0' (trace attribution + new direction).
+
+---
+
 ## Template (copy for each new run)
 
 ```

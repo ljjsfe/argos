@@ -1,0 +1,11 @@
+# Phase 0 train set — 8 stable-failure tasks (frozen 2026-05-18)
+# May inspect trace, derive helpers, write reference code.
+# Stratified split: 1 easy + 4 medium + 2 hard + 1 extreme.
+task_86
+task_163
+task_169
+task_173
+task_180
+task_344
+task_352
+task_418
