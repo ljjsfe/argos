@@ -23,7 +23,28 @@
 
 ## SC1-B — Opus, no helpers
 
-_Pending_
+| task | score | vs A |
+|---|---|---|
+| task_86 | 1.0 | = (Opus replaced `safe_read_json_df` with manual `{"records": [...]}` unwrap) |
+| task_163 | 1.0 | = (same unwrap pattern) |
+| task_180 | 1.0 | = |
+| task_344 | 0.0 | = (still data gap) |
+| task_352 | 1.0 | = |
+| task_418 | 1.0 | = (A had no helpers anyway) |
+
+**Score-≥0.9 pass count: 5/6 = SC1-A**.
+
+**Interpretation: A − B = 0**. Helpers are **convenience**, not **binding**,
+when Opus reasoning is unlimited. Without helpers, Opus must hand-write
+the JSON `records` unwrap (one extra line) but reaches the same answer.
+
+Decision-matrix row: `A ≥4/6 AND B ≈ A` → "helpers convenience not binding"
+→ **skip P1B, at most do P1A (docstring overhaul)**.
+
+NOTE: this is only an Opus-arm signal. Qwen arms (C1/C2) may show a
+different picture — if Qwen can't reliably figure out the unwrap on its
+own, helpers become binding *for Qwen* even though they aren't for Opus.
+That is the next probe.
 
 ## SC1-C1 — Qwen + API skeleton
 
