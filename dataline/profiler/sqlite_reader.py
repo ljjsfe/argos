@@ -15,11 +15,51 @@ logger = logging.getLogger(__name__)
 
 
 def read_sqlite(file_path: str) -> ManifestEntry:
-    """Profile a SQLite database into a ManifestEntry."""
+    """Profile a SQLite database into a ManifestEntry.
+
+    Empty/non-SQLite/empty-DuckDB files are returned as entries with an
+    explicit `empty=True` flag so PlannerCoder can see the file exists but
+    has no tables, rather than crashing on an opaque error.
+    """
     size = os.path.getsize(file_path)
-    conn = sqlite3.connect(file_path)
+
+    # Zero-byte file — explicit empty marker, skip the SQLite open entirely.
+    if size == 0:
+        return ManifestEntry(
+            file_path=file_path,
+            file_type="sqlite",
+            size_bytes=0,
+            summary={
+                "tables": [],
+                "foreign_keys": [],
+                "empty": True,
+                "empty_reason": "zero-bytes",
+            },
+        )
+
+    # Attempt SQLite open. Non-SQLite formats (e.g. DuckDB) raise DatabaseError;
+    # we re-attempt with DuckDB before deciding the file is corrupt.
     try:
-        tables = _get_tables(conn)
+        conn = sqlite3.connect(file_path)
+    except sqlite3.DatabaseError as e:
+        return _probe_non_sqlite(file_path, size, e)
+    try:
+        try:
+            tables = _get_tables(conn)
+        except sqlite3.DatabaseError as e:
+            return _probe_non_sqlite(file_path, size, e)
+        if not tables:
+            return ManifestEntry(
+                file_path=file_path,
+                file_type="sqlite",
+                size_bytes=size,
+                summary={
+                    "tables": [],
+                    "foreign_keys": [],
+                    "empty": True,
+                    "empty_reason": "sqlite-no-tables",
+                },
+            )
         foreign_keys = _get_foreign_keys(conn, tables)
 
         table_summaries = []
@@ -33,6 +73,70 @@ def read_sqlite(file_path: str) -> ManifestEntry:
             summary={
                 "tables": table_summaries,
                 "foreign_keys": foreign_keys,
+            },
+        )
+    finally:
+        conn.close()
+
+
+def _probe_non_sqlite(file_path: str, size: int, sqlite_err: Exception) -> ManifestEntry:
+    """If the file isn't SQLite, see if it parses as DuckDB (still common
+    in mixed-DB inputs). Return an entry tagged appropriately.
+    """
+    try:
+        import duckdb  # local import — only needed in the fallback path
+    except ImportError:
+        return ManifestEntry(
+            file_path=file_path,
+            file_type="sqlite",
+            size_bytes=size,
+            summary={
+                "tables": [],
+                "foreign_keys": [],
+                "empty": True,
+                "empty_reason": f"unparseable-no-duckdb ({sqlite_err})",
+            },
+        )
+
+    try:
+        conn = duckdb.connect(file_path, read_only=True)
+    except Exception as duck_err:
+        return ManifestEntry(
+            file_path=file_path,
+            file_type="sqlite",
+            size_bytes=size,
+            summary={
+                "tables": [],
+                "foreign_keys": [],
+                "empty": True,
+                "empty_reason": f"unparseable ({sqlite_err}; duckdb: {duck_err})",
+            },
+        )
+    try:
+        rows = conn.execute("SHOW TABLES").fetchall()
+        if not rows:
+            return ManifestEntry(
+                file_path=file_path,
+                file_type="duckdb",
+                size_bytes=size,
+                summary={
+                    "tables": [],
+                    "foreign_keys": [],
+                    "empty": True,
+                    "empty_reason": "duckdb-no-tables",
+                },
+            )
+        # Non-empty DuckDB — return a minimal tables listing. We do not deep-
+        # profile DuckDB tables here; the Sandbox can still query it.
+        table_names = [r[0] for r in rows]
+        return ManifestEntry(
+            file_path=file_path,
+            file_type="duckdb",
+            size_bytes=size,
+            summary={
+                "tables": [{"name": n, "columns": []} for n in table_names],
+                "foreign_keys": [],
+                "note": "DuckDB file (not deep-profiled)",
             },
         )
     finally:

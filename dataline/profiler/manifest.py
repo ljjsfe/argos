@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
@@ -16,6 +17,8 @@ from .excel_reader import read_excel
 from .image_reader import read_image
 from .parquet_reader import read_parquet
 from .cross_source import discover_relations
+
+logger = logging.getLogger(__name__)
 
 # Extension -> reader mapping
 READERS = {
@@ -38,12 +41,53 @@ READERS = {
 }
 
 
+# Output-convention blacklist (universal input hygiene).
+# A data agent should never consume artifacts that look like its own output.
+# These patterns are conservative — they match output-naming conventions across
+# data-agent projects (not KDD-specific): result.json, prediction.csv, etc.
+RESERVED_FILENAMES = frozenset({
+    "result.json",
+    "step_result.json",
+    "prediction.csv",
+    "trace.json",
+    "trace_agent.json",
+    "status.json",
+    "final_answer.txt",
+})
+RESERVED_SUFFIXES = ("_result.json", "_prediction.csv", "_results.pkl")
+RESERVED_PREFIXES = ("intermediate_", "step_")
+# Directories that conventionally contain agent output, regardless of where
+# they sit in the input tree. Matching is by directory basename, anywhere in
+# the path.
+RESERVED_DIR_BASENAMES = frozenset({"output", "workspace", "temp", "_pred_task_"})
+
+
+def _reserved_artifact_reason(rel_path: Path) -> str | None:
+    """Return a short reason string if `rel_path` is an agent-output artifact.
+
+    `rel_path` is relative to the task root. Returns None for legitimate input.
+    """
+    for part in rel_path.parts[:-1]:  # exclude the filename
+        if part in RESERVED_DIR_BASENAMES:
+            return f"reserved dir '{part}'"
+    name = rel_path.name
+    if name in RESERVED_FILENAMES:
+        return "reserved filename"
+    if name.endswith(RESERVED_SUFFIXES):
+        return "reserved suffix"
+    if name.startswith(RESERVED_PREFIXES):
+        return "reserved prefix"
+    return None
+
+
 def scan(task_dir: str) -> Manifest:
     """Scan a task directory recursively and build a Manifest."""
-    task_dir = os.path.abspath(task_dir)
+    task_dir_abs = os.path.abspath(task_dir)
+    task_root = Path(task_dir_abs)
     entries: list[ManifestEntry] = []
+    skipped: list[tuple[str, str]] = []
 
-    for root, _dirs, files in os.walk(task_dir):
+    for root, _dirs, files in os.walk(task_dir_abs):
         for fname in sorted(files):
             if fname.startswith("."):
                 continue
@@ -51,8 +95,16 @@ def scan(task_dir: str) -> Manifest:
             if fname == "task.json":
                 continue
             fpath = os.path.join(root, fname)
-            ext = Path(fname).suffix.lower()
+            rel = Path(fpath).relative_to(task_root)
 
+            # Output-convention hygiene: never consume agent-output artifacts.
+            reason = _reserved_artifact_reason(rel)
+            if reason is not None:
+                skipped.append((str(rel), reason))
+                logger.info("Profiler skip: %s (%s)", rel, reason)
+                continue
+
+            ext = Path(fname).suffix.lower()
             reader = READERS.get(ext)
             if reader is not None:
                 try:
