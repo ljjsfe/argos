@@ -3,45 +3,37 @@
 **Generated**: 2026-05-18
 **Gate**: Score ≥0.9 on ≥4/6 tasks
 
-## SC1-A — Opus + helpers (this commit)
+> Discipline: this file records **only** pass/fail/data-gap counts.
+> Per-task analysis lives in `eval_split/skeletons/task_<id>_NOTES.md` and is
+> NOT a design input for Phase 1B. Phase 1B may only reference the frozen
+> taxonomy SHA `43ad212` per `eval_split/TAXONOMY_SNAPSHOT.md`.
 
-| task | difficulty | score | helpers used | helper-gap observation |
-|---|---|---|---|---|
-| task_86 | easy | **1.0** | safe_read_csv, safe_read_json_df | "track number" → `position` semantic mapping is non-obvious from column names; no helper for column-semantic probe |
-| task_163 | medium | **1.0** | safe_read_csv, safe_read_json_df | event→budget→expense join graph; nothing exotic |
-| task_180 | medium | **1.0** | safe_read_csv | Amount=0 division-by-zero must be filtered explicitly; no helper for "safe per-unit calc" |
-| task_344 | hard | **0.0** | safe_read_csv | **DATA GAP** — gold expects 4 distinct male patients, data only has 3. Failure is data-completeness, not helper-insufficiency |
-| task_352 | hard | **1.0** | safe_read_csv | Narrative budget.md parse (sentence-level current-budget tracking + revised-amount last-wins); no helper for narrative-to-structured extraction |
-| task_418 | extreme | **1.0** | (pure markdown parse) | Same narrative-to-structured pattern across Lab.md + Patient.md; no helper |
+## SC1-A — Opus + helpers
 
-### Result
+| task | difficulty | score | helper-status |
+|---|---|---|---|
+| task_86 | easy | 1.0 | sufficient |
+| task_163 | medium | 1.0 | sufficient |
+| task_180 | medium | 1.0 | sufficient |
+| task_344 | hard | 0.0 | NA — data-completeness gap, not helper gap |
+| task_352 | hard | 1.0 | sufficient |
+| task_418 | extreme | 1.0 | sufficient |
 
-**5/6 tasks (83%) achieved Score ≥0.9 with Opus + current helpers.**
+**Score-≥0.9 pass count: 5/6 → Gate ≥4/6 PASS**.
 
-Gate `≥4/6` → **PASS**. Helpers are sufficient to express correct answers for 5 of 6 known-failure tasks. The 1 failure (task_344) is data-completeness, not helper insufficiency.
+## SC1-B — Opus, no helpers
 
-### Observations on helper gaps (from where Opus had to write substantial code)
+_Pending_
 
-Three patterns recurred but were NOT served by helpers:
+## SC1-C1 — Qwen + API skeleton
 
-1. **Narrative-to-structured extraction**
-   - task_352, task_418 (and possibly others)
-   - Per-paragraph regex with sentence-level current-entity tracking + "revised value overrides provisional"
-   - Universal pattern but not in helper lib
+_Pending_
 
-2. **Sex-specific / domain-specific medical ranges**
-   - task_344, task_418 (creatinine, WBC, FG)
-   - Standard medical ranges treated as common knowledge, not data
-   - May not be helper material (taxonomy issue rather than infrastructure)
+## SC1-C2 — Qwen + logic skeleton
 
-3. **Semantic-mapping from question word → column**
-   - task_86 ("track number" → `position`)
-   - Hard to automate; requires schema-content alignment that small models miss
-   - Possibly addressable by feature router (Phase 1C)
+_Pending_
 
-### Reproducibility
-
-All A.py files + prediction.csv in `eval_split/skeletons/`.
+## Reproducibility
 
 ```bash
 for t in 86 163 180 344 352 418; do
@@ -49,14 +41,13 @@ for t in 86 163 180 344 352 418; do
 done
 ```
 
-## SC1-B — Opus, NO helpers (next)
+Predictions land in `eval_split/skeletons/_pred_task_<id>_A/prediction.csv`
+(gitignored). Source reference code is checked in at
+`eval_split/skeletons/task_<id>_A.py`.
 
-Same 6 tasks, pure SQL/pandas/regex. Compares A vs B to determine if helpers are *binding* or *convenience*.
+## Decision protocol (see experiment.md Phase 0 plan)
 
-## SC1-C1 — Qwen + API skeleton (after B)
-
-Per rubric.
-
-## SC1-C2 — Qwen + logic skeleton (after C1)
-
-Per rubric.
+Once SC1-A/B/C1/C2 all complete, apply the decision matrix in
+`experiment.md` to pick Phase 1 path. **Do NOT design helpers from
+SC1 observations.** Phase 1B helpers must derive only from
+`docs/QWEN_CAPABILITY_PROFILE.md` at SHA `43ad212`.
