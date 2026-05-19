@@ -155,10 +155,38 @@ leaked artifacts benefit).
 - Actual blacklist implementation in `dataline/profiler/manifest.py`.
 - Holdout (5) regression check.
 
-## 7. Decision required from user
+## 7. UPDATE 2026-05-18 — A2 paired test FALSIFIES Hypothesis A
 
-Single ship decision:
-**A — implement Profiler output-convention blacklist** (small infrastructure
-change, 10-15 LOC in `manifest.py::scan`, universal hygiene rule).
+Ran production agent on `tmp/clean_input/task_352` and `tmp/clean_input/task_418`
+with leaked artifacts removed (rsync exclude `result.json`, `step_result.json`,
+`intermediate_*`, `output/`, `*_result.json`). Cost: ~$4. Result:
 
-Or wait for paired-eval verification before coding.
+| task | v80 (with leaks) | cleaned input | delta |
+|---|---|---|---|
+| task_352 | 0.0 | 0.0 (returned "Unknown", all 3 heavy trajectories empty) | **0** |
+| task_418 | 0.0 | 0.0 (returned 0, narrative parse still failed) | **0** |
+
+Trace inspection shows that with clean input, Qwen DID look at the correct
+data sources (budget.md, Laboratory.md, Patient.md) but failed at the
+narrative-to-structured regex extraction. The leaked artifacts were a
+*confound* that masked the underlying narrative-parsing failure — the
+binding cause is the parsing bug itself.
+
+**Conclusion**: Profiler blacklist would not improve score on these 2 tasks.
+It may still have value as cost reduction (preventing wasted iterations) but
+the original score-improvement justification is invalid.
+
+**Lesson**: trace-based hypotheses require paired-eval validation. The
+"8/8 iter referenced result.json" was a *symptom* of the agent having
+no better path forward, not a *cause* of failure.
+
+## 8. Re-categorized failure families (post-A2)
+
+| family | tasks | root cause | tested fix? |
+|---|---|---|---|
+| Narrative-to-structured parse | task_352, task_418 | regex extraction fails on prose | SC1 + A2 both unable to fix |
+| Semantic mapping / aggregation choice | task_86, task_163 | wrong column or aggregation level | not yet probed |
+| Filter scope | task_180 | filter doesn't restrict to right subset | not yet probed |
+| Data gap | task_344 | gold unreachable from data | not fixable |
+
+No single infrastructure fix covers all 4 families. Awaiting direction.
