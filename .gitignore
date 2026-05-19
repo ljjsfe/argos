@@ -43,3 +43,5 @@ result.txt
 step_result.json
 team1314_v*.tar.gz
 analyze_v*.py
+# Phase 0 SC1 prediction outputs (generated, not source)
+eval_split/skeletons/_pred_*/
