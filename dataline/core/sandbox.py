@@ -27,6 +27,70 @@ from .types import SandboxResult
 logger = logging.getLogger(__name__)
 
 
+def _snapshot_dir(root: str) -> dict[str, float]:
+    """Map path → mtime for every regular file under `root`. Used by L2
+    sandbox-guard to detect agent code writing into the (read-only) TASK_DIR.
+    """
+    snap: dict[str, float] = {}
+    if not os.path.isdir(root):
+        return snap
+    for d, _, files in os.walk(root, followlinks=False):
+        for f in files:
+            p = os.path.join(d, f)
+            try:
+                snap[p] = os.stat(p).st_mtime
+            except OSError:
+                continue
+    return snap
+
+
+def _strip_task_dir_writes(
+    result: "SandboxResult", task_dir: str, pre_snapshot: dict[str, float],
+) -> "SandboxResult":
+    """L2 guard: after every execute(), find files in TASK_DIR that were
+    created/modified during the step. Delete them and append a clear
+    violation note to stderr so PlannerCoder learns to avoid the pattern.
+
+    Universal hygiene — applies regardless of benchmark / data shape.
+    Production submission containers typically mount input read-only, so
+    this is defense-in-depth for local + Phase 2 envs alike.
+    """
+    post = _snapshot_dir(task_dir)
+    violations: list[str] = []
+    for p, mtime in post.items():
+        if p not in pre_snapshot or pre_snapshot[p] < mtime - 1e-6:
+            violations.append(p)
+    if not violations:
+        return result
+
+    # Delete the offending writes so subsequent steps don't see them.
+    for p in violations:
+        try:
+            os.remove(p)
+        except OSError as e:
+            logger.warning("L2 guard: could not delete leaked write %s: %s", p, e)
+
+    rel_paths = [
+        os.path.relpath(p, task_dir) for p in sorted(violations)[:6]
+    ]
+    note = (
+        "\n[SANDBOX:L2_LEAK_GUARD] Your code wrote into TASK_DIR (read-only). "
+        f"Files removed: {rel_paths}. "
+        "All writes (intermediates, results) MUST go to TEMP_DIR via "
+        "save_result() / save_intermediate() / explicit absolute paths under "
+        "TEMP_DIR. Re-write this step without TASK_DIR writes."
+    )
+    # Re-assemble SandboxResult with augmented stderr; preserve other fields.
+    return SandboxResult(
+        stdout=result.stdout,
+        stderr=(result.stderr or "") + note,
+        return_code=result.return_code,
+        execution_time_ms=result.execution_time_ms,
+        step_id=result.step_id,
+        structured_json=result.structured_json,
+    )
+
+
 _SQL_RUNNER_TEMPLATE = '''"""Auto-generated SQL runner — DuckDB unified engine."""
 import os
 import json
@@ -192,6 +256,11 @@ class Sandbox:
             step_id = f"step_{self._step_count}"
         self._step_count += 1
 
+        # L2 leak prevention: snapshot TASK_DIR before exec. After exec, any
+        # new/modified files in TASK_DIR are agent-output leaks and get cleaned
+        # up with a violation message attached to stderr.
+        pre_snapshot = _snapshot_dir(self._task_dir)
+
         # Snapshot prior step_result.json so a clean step that ran verification
         # code without re-calling save_result() can carry the prior answer
         # forward (avoids missing_save_result loops). The prior is only
@@ -222,7 +291,8 @@ class Sandbox:
         # resolution. Agent code that uses raw relative paths will fail by
         # design — prompt nudges agent toward safe_read_* helpers.
         if self._stateful_repl is not None and language == "python":
-            return self._execute_via_repl(code, step_id, prior_step_json)
+            result = self._execute_via_repl(code, step_id, prior_step_json)
+            return _strip_task_dir_writes(result, self._task_dir, pre_snapshot)
 
         # Write code to temp file (in TEMP_DIR, not scratch — keeps scratch clean)
         code_path = Path(self._temp_dir) / f"{step_id}.py"
@@ -247,7 +317,7 @@ class Sandbox:
             )
             elapsed_ms = int((time.time() - start) * 1000)
 
-            return SandboxResult(
+            result = SandboxResult(
                 stdout=proc.stdout[:10000],  # cap output size
                 stderr=proc.stderr[:5000],
                 return_code=proc.returncode,
@@ -257,6 +327,7 @@ class Sandbox:
                     proc.returncode, prior_step_json,
                 ),
             )
+            return _strip_task_dir_writes(result, self._task_dir, pre_snapshot)
         except subprocess.TimeoutExpired:
             elapsed_ms = int((time.time() - start) * 1000)
             return SandboxResult(
