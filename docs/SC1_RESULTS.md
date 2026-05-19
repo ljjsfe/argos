@@ -81,7 +81,54 @@ diagnostic that separates the two.
 
 ## SC1-C2 — Qwen + logic skeleton
 
-_Pending_
+Same runner; skeleton uses NO helper calls, contains numbered step-by-step
+decomposition + TODO expression placeholders. Probe output appended to prompt.
+
+| task | score | failure mode |
+|---|---|---|
+| task_86 | 0.0 | wrong semantic mapping: chose `drivers.number` (car number) over `standings.position` |
+| task_163 | 1.0 | ✓ |
+| task_180 | 0.0 | type mismatch: filter `Date == '201208'` (string) but column is int |
+| task_344 | 0.0 | answer = 3 (data gap, same as A — NOT a Qwen failure) |
+| task_352 | EXEC_FAIL | regex group index error (incomplete regex spec) |
+| task_418 | 0.0 | regex too loose; count = 31 (way over) |
+
+**Score-≥0.9 pass count: 1/6**.
+
+Net Qwen-attributable: 1/5 PASS (task_344 excluded — data gap).
+
+## Headline decision-matrix reading
+
+| arm | pass | Qwen-attributable pass |
+|---|---|---|
+| A | 5/6 | (Opus) |
+| B | 5/6 | (Opus) |
+| C1 | 0/6 | 0/5 |
+| C2 | 1/6 | 1/5 |
+
+- **A ≥ 4/6** ✓ — helpers + Opus reasoning are sufficient
+- **B ≈ A** — helpers convenience-only (for Opus)
+- **C1 << A** — discovery is NOT the gap (helpers handed in, still fails)
+- **C2 ≈ C1, both << A** — decomposition outline does NOT substantially close
+  the gap. Even with full step-by-step plan, Qwen still fails 4/5 attributable
+
+**Matrix row: `A ≥4/6 AND B ≈ A AND C1 << A AND C2 << A` → REASONING/IMPL gap.**
+
+Per planned matrix, this routes to "P2A probe first, P1 low priority".
+
+**BUT the C2 = 1/5 result complicates this.** Upstream Decomposer (P2A) is
+*literally what the C2 skeleton simulates* — full decomposition outline + named
+subgoals + TODO expressions. If P2A's mechanism is "pre-decompose then let Qwen
+fill", we already have evidence Qwen only fills correctly 1/5 of the time even
+with that help. P2A as planned will NOT close the gap.
+
+The four observed Qwen failure shapes on C2:
+1. **Semantic concept → column mapping** (task_86: "track number" → `position`)
+2. **Type-aware filter writing** (task_180: int vs str literal)
+3. **Regex completeness** (task_352, task_418: incomplete capture groups, loose patterns)
+4. (No "decomposition planning" failure observed — that's the diagnostic point)
+
+These are *expression-level correctness* issues, not decomposition gaps.
 
 ## Reproducibility
 
