@@ -31,6 +31,7 @@ from ..core.sandbox import Sandbox
 from ..core.state import (
     add_step,
     create_initial_state,
+    set_focus_hints,
     set_playbook_hints,
     set_question_analysis,
     set_task_mode,
@@ -251,6 +252,20 @@ def run_task(
         state = set_task_mode(state, task_mode)
         _log(trace, "task_router", f"Task mode: {task_mode}")
         obs["task_mode"] = task_mode
+
+        # ─── Stage 3c': Focus hints — question entity → manifest binding ───
+        # Deterministic, zero LLM. Universal across benchmarks. Replaces the
+        # filename-as-hint mechanism that previously leaked through polluted
+        # inputs (see docs/LEAK_TO_HONEST_INFO_MAP.md).
+        try:
+            from .focus_hints import build_focus_hints
+            _fh = build_focus_hints(question, manifest)
+            if _fh:
+                state = set_focus_hints(state, _fh)
+                _log(trace, "focus_hints", f"{_fh.count(chr(10))+1} hints generated")
+                obs["focus_hints_lines"] = _fh.count("\n") + 1
+        except Exception as e:
+            _log(trace, "focus_hints", f"skipped: {e}")
 
         # ─── Stage 3d: Playbook retrieval (curated patterns, zero LLM) ───
         # Fail-soft: missing/empty playbook → no hints, no behavior change.

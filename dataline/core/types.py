@@ -195,6 +195,7 @@ class AnalysisState:
     task_mode: str = ""                              # deterministic routing hint (single_sql, multi_sql, python_extract, etc.)
     playbook_hints: str = ""                         # curated patterns retrieved at task start (advisory)
     playbook_entry_ids: tuple[str, ...] = ()         # ids of retrieved entries — for telemetry tracking
+    focus_hints: str = ""                            # deterministic question-entity → manifest column/value bindings (A1/H1)
     completed_steps: tuple[str, ...] = ()           # 1-line per step
     full_step_details: tuple[StepRecord, ...] = ()  # raw data for Finalizer + Judge
 

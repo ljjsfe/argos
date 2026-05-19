@@ -59,6 +59,11 @@ def set_playbook_hints(
     return replace(state, playbook_hints=hints, playbook_entry_ids=entry_ids)
 
 
+def set_focus_hints(state: AnalysisState, hints: str) -> AnalysisState:
+    """Return new state with focus_hints (question-entity↔manifest bindings) set."""
+    return replace(state, focus_hints=hints)
+
+
 def compress_manifest(manifest: Manifest) -> str:
     """Compress manifest to rich schema context.
 

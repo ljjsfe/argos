@@ -253,6 +253,26 @@ def _build_context_managed_prompt(
             heading="",
         ))
 
+    # Focus hints — deterministic question-entity → manifest binding.
+    # Tells planner which columns / values the question literally references,
+    # bypassing the small-model "guess which column matches this concept"
+    # bottleneck. Placed above manifest so the planner sees the bindings
+    # before the full schema dump.
+    if state.focus_hints:
+        sections.append(Section(
+            name="focus_hints",
+            content=(
+                f"## Focus Hints (deterministic question→data anchors)\n"
+                f"The question's entities match the following columns/values:\n"
+                f"{state.focus_hints}\n\n"
+                f"These bindings are based on EXACT value matches in the data; "
+                f"prefer them over guessing column meanings."
+            ),
+            priority=91,
+            compressible=False,
+            heading="",
+        ))
+
     # Data manifest (rich schema with DISTINCT values, sample rows)
     sections.append(Section(
         name="manifest",
