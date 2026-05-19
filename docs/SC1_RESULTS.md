@@ -48,7 +48,36 @@ That is the next probe.
 
 ## SC1-C1 — Qwen + API skeleton
 
-_Pending_
+Runner: `scripts/run_sc1_qwen.py --arm C1`. Two-stage:
+- run the skeleton's PROBE block, capture stdout (col names + 3-row head)
+- include probe output in user prompt so Qwen sees the actual schema
+- single LLM call; Qwen returns the full filled script
+
+| task | score | pred shape vs gold |
+|---|---|---|
+| task_86 | 0.0 | duplicates rows; no dedup |
+| task_163 | 0.0 | 2 rows by category, not 1 row for October Meeting |
+| task_180 | 0.0 | 0 rows; filter wrong |
+| task_344 | 0.0 | answer = 3 (same as A — data gap, NOT a Qwen failure) |
+| task_352 | 0.0 | ratio = 0.0; narrative parse failed |
+| task_418 | 0.0 | count = 0; narrative parse failed |
+
+**Score-≥0.9 pass count: 0/6**.
+
+Net Qwen-attributable failures: **5/6** (task_344 excluded — data gap).
+
+**Interpretation: C1 << A**. Even with API skeleton (helper calls already in
+place, probe output appended), Qwen fails to fill in correct expressions on
+5 of 6 tasks. The gap is NOT discovery — helpers are *handed* to Qwen.
+
+The gap is therefore in:
+- expression-level implementation (dedup, filter, groupby choice)
+- narrative-to-structured parsing (task_352, task_418)
+- multi-step reasoning over 3 tables (task_86, task_163)
+
+This points to either (a) decomposition gap or (b) implementation gap.
+SC1-C2 (logic skeleton with decomposition outline pre-provided) is the
+diagnostic that separates the two.
 
 ## SC1-C2 — Qwen + logic skeleton
 
