@@ -40,6 +40,9 @@ NUMBER_RE = re.compile(r"\b(\d{2,}(?:\.\d+)?|\d\.\d+)\b")
 
 # Common question-stem words that match the capital-single regex but are
 # not informative entities.
+# TODO (P5 generalisation, B2-era): this list is English-only. Non-English
+# benchmarks (e.g., multilingual eval) will leak question stems as entities.
+# Replace with language-aware tokenisation or LLM-tagged NER when we generalise.
 QUESTION_STOPWORDS = frozenset({
     "Which", "What", "Where", "When", "Who", "Why", "How", "Among", "Above",
     "Below", "Between", "Across", "Against", "After", "Before", "During",
@@ -185,6 +188,11 @@ def _load_full_distinct_if_low_cardinality(
         if suffix == ".json":
             import pandas as pd
             obj = json.loads(Path(file_path).read_text())
+            # TODO (P5 generalisation): {"records":[...]} is the KDD Airtable
+            # export shape. Other benchmarks may use top-level lists, nested
+            # arrays under different keys, or JSONL streams. When generalising,
+            # delegate JSON shape detection to safe_read_json_df rather than
+            # hard-coding "records".
             if isinstance(obj, dict) and "records" in obj:
                 obj = obj["records"]
             if isinstance(obj, list) and obj and isinstance(obj[0], dict):

@@ -42,6 +42,11 @@ def _normalize_csv(text: str) -> str:
     benchmarks (e.g. DABstep) require exact match. A future change should
     parameterise tolerance via config (see TODO in heavy_deliberator notes).
 
+    TODO (P6 generalisation): expose `tolerance="kdd_2dp" | "exact"` and
+    `ignore_headers` as args, drive from config.yaml `heavy_mode.tolerance`,
+    default to "kdd_2dp" until benchmark-specific configs exist. Done as
+    part of the A1/A2/A3 universalisation pass after B2 ships.
+
     Canonicalisation:
       1. drop the header row
       2. drop fully-blank / all-whitespace / all-empty-cell rows
