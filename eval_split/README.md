@@ -21,11 +21,11 @@ Derived from `scripts/mine_failure_patterns.py` cross-run analysis (101 historic
 ## Discipline rules
 
 1. **train_8.txt** — may inspect trace, write reference code, derive helpers.
-2. **holdout_5.txt** — task_id list ONLY. Never read trace, never inspect intermediate output, never write reference code. Used solely to validate Phase 1 ship decisions.
+2. **holdout.txt** — task_id list ONLY. Never read trace, never inspect intermediate output, never write reference code. Used solely to validate Phase 1 ship decisions.
 3. If holdout regression ≠ 0 after a Phase 1 ship, the phase reverts.
 4. To change the split: requires a new freeze commit with reason logged in `experiment.md`.
 
 ## Files
 
 - `train_8.txt` — 8 task_ids
-- `holdout_5.txt` — 5 task_ids (read-only context)
+- `holdout.txt` — 5 task_ids (read-only context)

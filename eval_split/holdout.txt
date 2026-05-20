@@ -1,0 +1,14 @@
+# Phase 0 holdout — was 5 tasks, now 4 after task_257 contamination removed (2026-05-19)
+# DO NOT READ TRACE. DO NOT WRITE REFERENCE CODE. DO NOT INSPECT INTERMEDIATE OUTPUT.
+# Used solely to detect overfitting at ship gates.
+#
+# REMOVED 2026-05-19: task_257 — A3/A2 design phase referenced its heavy_trajectories
+# output in commit messages (3d22080, 7b4b903), violating holdout discipline.
+# Accepted N=4 holdout rather than substituting because picking a replacement now
+# would require inspecting candidates — also tainting them.
+#
+# Remaining stratified split: 1 easy + 1 medium + 2 hard.
+task_89
+task_199
+task_379
+task_396

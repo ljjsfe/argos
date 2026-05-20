@@ -116,7 +116,7 @@ Before committing to any new direction:
    - HarnessGate rule additions (multiple reverted)
    - Judge prompt augmentations (rubric v81/v82 reverted)
    - Self-check loops (CoVe family — Phase 2.4 was pending, never tried)
-3. **Holdout discipline**: holdout_5.txt names are never read; any
+3. **Holdout discipline**: holdout.txt names are never read; any
    intervention must wait until P1V holdout validation before ship.
 4. **Stop-loss**: total Phase 0+1 budget ≤ $30, ≤ 5 working days.
 
