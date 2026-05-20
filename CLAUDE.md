@@ -326,3 +326,24 @@ MODEL_NAME      — "qwen3.5-35b-a3b"
 - **No silent errors**: every agent logs its reasoning to trace.json
 - **Test coverage**: `dataline/tests/` — run with `pytest dataline/tests/`
 - **Python 3.11+**
+
+---
+
+## Hygiene Audit Trigger (MANDATORY for new write paths)
+
+Any new component that writes to the filesystem **MUST** enumerate its write
+paths against the input-hygiene threat model BEFORE shipping. This includes:
+
+- New caches (LLM output, manifests, profiler outputs)
+- New intermediate artifact paths
+- Anything created by Sandbox, agents, or helpers at runtime
+
+**The check** — for every write path the new code can produce, answer:
+
+1. Does it land inside `task_dir`? If yes → **STOP**. Move to `<repo_root>/.dataline_cache/<feature>/` or `TEMP_DIR`. Profiler will re-scan `task_dir` on the next run and treat the artifact as input.
+2. Does Sandbox `_build_scratch()` need to skip it? If the write path is a dot-dir or matches `RESERVED_DIR_BASENAMES` / `RESERVED_FILENAMES` in `profiler/manifest.py`, the existing filter handles it — but verify by adding a test.
+3. Does the L2 guard (`_strip_task_dir_writes`) catch it as a fallback? L2 is defense-in-depth, not the primary defense.
+
+**Why this rule exists** — 2026-05-19 audit found B2 doc-glossary cache (#64, shipped 2026-05-17) wrote to `task_dir/.dataline_cache/`. Profiler re-scanned the cache JSONs as inputs across 50 KDD task dirs for ~3 eval runs (v90/v91/v91b). Earlier hygiene audits (#55/#57/#58) couldn't find this because B2 didn't exist yet, and no rule forced re-audit when a new write path shipped. Same class of bug WILL recur if this rule is skipped.
+
+**How to apply** — when adding any new feature that touches the filesystem, add a unit test asserting the write does NOT land in `task_dir` (see `test_doc_glossary.py::TestCacheLocation` for the pattern: monkeypatch the cache root to `tmp_path`, run the feature, assert `list(task_dir.rglob(".dataline_cache")) == []`).
