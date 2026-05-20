@@ -336,11 +336,23 @@ _DEBUG_COLUMN_PATTERNS = [
     r"^level_\d+$", r"^__",
 ]
 
+# Columns that almost always indicate internal join keys / debug data left in
+# the answer (universal — these are universally "internal identifier" naming
+# conventions, not benchmark-specific). v92 audit: task_330 returned
+# `home_team_api_id, away_team_api_id` next to the real answer.
+_INTERNAL_ID_COLUMN_PATTERNS = [
+    r"^.*_api_id$",
+    r"^.*_internal_id$",
+    r"^.*_pk$",
+    r"^row_id$",
+    r"^_id$",
+]
+
 
 def _check_extra_columns(
     structured_json: str,
 ) -> list[HarnessFlag]:
-    """Rule 7b: detect debug/index columns in answer.
+    """Rule 7b: detect debug/index/internal-id columns in answer.
 
     Scalar-with-multi-column check moved to unified _check_shape().
     """
@@ -365,6 +377,19 @@ def _check_extra_columns(
                     f"Answer contains debug/index column '{col_name}'. "
                     f"Remove it — return only the columns the question "
                     f"requests; extras dilute the answer."
+                ),
+            ))
+        elif any(re.match(p, col_lower) for p in _INTERNAL_ID_COLUMN_PATTERNS):
+            # Internal-id leak is a stronger signal — block immediately.
+            # These columns are never asked for by NL questions; they're
+            # join keys that leaked through to the final answer.
+            flags.append(HarnessFlag(
+                rule="extra_columns",
+                severity="block",
+                message=(
+                    f"Answer contains internal/foreign-key column "
+                    f"'{col_name}' — this is a join key, not a value the "
+                    f"question asks for. Drop it from the SELECT/output."
                 ),
             ))
     return flags
@@ -431,6 +456,107 @@ def _check_empty_answer(
             )]
 
     return []
+
+
+# ---------------------------------------------------------------------------
+# Rule 8c: Filter-no-effect — scalar zero on a filter-and-aggregate question
+# ---------------------------------------------------------------------------
+#
+# Catches the very common Cluster-A failure shape: code runs, returns a scalar
+# 0 (count, ratio, percentage, sum), but the question implies a non-zero
+# result. Root causes: WHERE filter collapsed to empty (wrong literal /
+# threshold), JOIN missed (wrong key), or aggregation produced zero where it
+# shouldn't. v92 audit found 3+ tasks of this shape (352 ratio=0, 396 pct=0,
+# 418 count=0) — none caught by existing rules.
+#
+# Universal — applies regardless of benchmark. The rule is **WARN by default
+# (legit zero is possible), BLOCK only when combined with a `sql_where_value`
+# WARN on the same iteration** (very strong "WHERE missed" signal).
+
+_FILTER_AGG_TRIGGERS = (
+    # Counting with filter
+    r"\bhow\s+many\b", r"\bnumber\s+of\b", r"\bcount\s+of\b", r"\btotal\s+number\b",
+    # Ratio / proportion
+    r"\bratio\b", r"\bproportion\b", r"\bhow\s+much\s+more\b",
+    r"\bhow\s+many\s+times\b", r"\bwhat.*times\b",
+    # Percentage
+    r"\bpercentage\b", r"\bpercent\b", r"\bwhat.*%\b",
+    # Sum / total
+    r"\btotal\b.*\bof\b",
+)
+_FILTER_AGG_RE = tuple(re.compile(p, re.IGNORECASE) for p in _FILTER_AGG_TRIGGERS)
+
+
+def _check_filter_no_effect(
+    question: str,
+    structured_json: str,
+    spec: QuestionSpec,
+    existing_flags: list[HarnessFlag],
+) -> list[HarnessFlag]:
+    """Rule 8c: scalar-zero on aggregation-with-filter questions.
+
+    Fires WARN when:
+      • answer is a single numeric scalar equal to 0 (any zero — int, float,
+        '0.00'), AND
+      • question contains aggregation/filter triggers (how many, percentage,
+        ratio, ...).
+
+    Escalates to BLOCK when the SAME iteration ALSO has a `sql_where_value`
+    flag — combined signal of "WHERE filter doesn't match manifest".
+    """
+    if not structured_json:
+        return []
+    # Only act on scalar answers. For scalar QuestionSpec we trust the spec;
+    # otherwise we still allow the rule when answer is structurally scalar
+    # (1 col, 1 row).
+    try:
+        data = json.loads(structured_json)
+        answer = data.get("answer", {})
+        if not isinstance(answer, dict):
+            return []
+    except (json.JSONDecodeError, ValueError):
+        return []
+
+    if not answer:
+        return []
+    # Must be 1 column × 1 row.
+    if len(answer) != 1:
+        return []
+    only_vals = next(iter(answer.values()))
+    if isinstance(only_vals, list):
+        if len(only_vals) != 1:
+            return []
+        only_vals = only_vals[0]
+    # Check numeric zero.
+    try:
+        f = float(only_vals)
+    except (TypeError, ValueError):
+        return []
+    if f != 0:
+        return []
+
+    # Question must look like a filter-and-aggregate.
+    if not any(rx.search(question) for rx in _FILTER_AGG_RE):
+        return []
+
+    # Escalate to BLOCK if there's already a WHERE-literal mismatch on this iter.
+    has_where_warn = any(
+        (f.rule == "sql_where_value") for f in existing_flags
+    )
+    severity = "block" if has_where_warn else "warn"
+    detail = (
+        "Scalar answer is 0 on a filter-and-aggregate question — the most "
+        "common cause is a WHERE filter that matched no rows (wrong literal "
+        "spelling/case, wrong threshold, or missing JOIN). Re-check filter "
+        "values against the manifest DISTINCT lists, verify any numeric "
+        "threshold against documented bounds, and confirm the JOIN keys."
+    )
+    if has_where_warn:
+        detail += (
+            " ALSO sql_where_value flagged — the WHERE literal isn't in the "
+            "known DISTINCT values. Fix the WHERE clause."
+        )
+    return [HarnessFlag(rule="filter_no_effect", severity=severity, message=detail)]
 
 
 # ---------------------------------------------------------------------------
@@ -1254,7 +1380,12 @@ def check(
     # Tie-possible check
     flags.extend(_check_tie_possible(spec, question, code, structured_json))
 
-    # SQL static analysis (fail-open)
+    # SQL static analysis (fail-open) — must run BEFORE filter_no_effect so
+    # the latter can detect a combined sql_where_value + scalar-zero pattern.
     flags.extend(_check_sql_static(code, data_profile, spec))
+
+    # Rule 8c — filter-no-effect (scalar-zero on aggregation question).
+    # Takes existing flags as input so it can escalate on combined signal.
+    flags.extend(_check_filter_no_effect(question, structured_json, spec, flags))
 
     return flags

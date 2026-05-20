@@ -16,10 +16,12 @@ from dataline.agents.harness_gate import (
     _check_error_string_answer,
     _check_excuse_answer,
     _check_extra_columns,
+    _check_filter_no_effect,
     _check_nan_values,
     _check_value_embellishment,
     check,
 )
+from dataline.core.types import HarnessFlag, QuestionSpec
 
 
 def _make_structured(answer: dict) -> str:
@@ -403,3 +405,124 @@ class TestAggTypeSumAsAverage:
             "SELECT SUM(salary) / 10 FROM employees",
         )
         assert any(f.rule == "agg_type" for f in flags)
+
+
+# ---------------------------------------------------------------------------
+# P1: filter-no-effect (scalar zero on aggregation-with-filter question)
+# ---------------------------------------------------------------------------
+
+class TestFilterNoEffect:
+    """Catches v92 Cluster-A pattern: code runs successfully, returns scalar
+    zero on a question that implies a non-zero result. Universal — not
+    benchmark-specific."""
+
+    def _spec(self):
+        return QuestionSpec()
+
+    def test_count_question_scalar_zero_warns(self):
+        s = _make_structured({"count": [0]})
+        flags = _check_filter_no_effect(
+            "How many patients have abnormal creatinine?", s, self._spec(), []
+        )
+        assert any(f.rule == "filter_no_effect" and f.severity == "warn" for f in flags)
+
+    def test_ratio_question_scalar_zero_warns(self):
+        s = _make_structured({"ratio": [0.0]})
+        flags = _check_filter_no_effect(
+            "How many times was X more than Y?", s, self._spec(), []
+        )
+        assert any(f.rule == "filter_no_effect" and f.severity == "warn" for f in flags)
+
+    def test_percentage_zero_warns(self):
+        s = _make_structured({"pct": [0]})
+        flags = _check_filter_no_effect(
+            "What is the percentage of heroes published by Marvel?",
+            s, self._spec(), [],
+        )
+        assert any(f.rule == "filter_no_effect" and f.severity == "warn" for f in flags)
+
+    def test_combined_signal_escalates_to_block(self):
+        s = _make_structured({"count": [0]})
+        existing = [
+            HarnessFlag(rule="sql_where_value", severity="warn",
+                        message="WHERE foo='bar' not in DISTINCT"),
+        ]
+        flags = _check_filter_no_effect(
+            "How many patients?", s, self._spec(), existing
+        )
+        assert any(f.rule == "filter_no_effect" and f.severity == "block" for f in flags)
+
+    def test_non_aggregation_question_does_not_fire(self):
+        # Lookup/retrieval questions can legit return 0.
+        s = _make_structured({"value": [0]})
+        flags = _check_filter_no_effect(
+            "What is the score for team X?", s, self._spec(), []
+        )
+        assert not any(f.rule == "filter_no_effect" for f in flags)
+
+    def test_nonzero_scalar_does_not_fire(self):
+        s = _make_structured({"count": [42]})
+        flags = _check_filter_no_effect(
+            "How many patients?", s, self._spec(), []
+        )
+        assert not any(f.rule == "filter_no_effect" for f in flags)
+
+    def test_multi_row_does_not_fire(self):
+        # Rule scope: scalar 1-row 1-col only.
+        s = _make_structured({"count": [0, 0, 0]})
+        flags = _check_filter_no_effect(
+            "How many patients?", s, self._spec(), []
+        )
+        assert not any(f.rule == "filter_no_effect" for f in flags)
+
+    def test_multi_column_does_not_fire(self):
+        s = _make_structured({"a": [0], "b": [0]})
+        flags = _check_filter_no_effect(
+            "How many patients?", s, self._spec(), []
+        )
+        assert not any(f.rule == "filter_no_effect" for f in flags)
+
+    def test_non_numeric_value_does_not_fire(self):
+        s = _make_structured({"name": ["foo"]})
+        flags = _check_filter_no_effect(
+            "How many entries?", s, self._spec(), []
+        )
+        assert not any(f.rule == "filter_no_effect" for f in flags)
+
+
+# ---------------------------------------------------------------------------
+# P2: internal-id columns in answer (extra_columns BLOCK)
+# ---------------------------------------------------------------------------
+
+class TestInternalIdColumnBlock:
+    """Catches v92 task_330: pred had `home_team_api_id`, `away_team_api_id`
+    leaking as columns alongside the legitimate answer. These are universal
+    'internal identifier' naming conventions across most schemas — not
+    benchmark-specific."""
+
+    def test_api_id_column_blocks(self):
+        s = _make_structured({
+            "final_score": ["1 - 1"],
+            "home_team_api_id": [8203],
+            "away_team_api_id": [8342],
+            "home_team_goal": [1],
+            "away_team_goal": [1],
+        })
+        flags = _check_extra_columns(s)
+        blocks = [f for f in flags if f.severity == "block"]
+        assert len(blocks) >= 2, "Both *_api_id columns should BLOCK"
+        assert all(f.rule == "extra_columns" for f in blocks)
+
+    def test_legitimate_id_named_columns_not_blocked(self):
+        # 'id' alone is too generic — many tables have legit `id` columns.
+        # Only specific suffixes (_api_id, _pk, _internal_id) should block.
+        s = _make_structured({"id": [1, 2], "name": ["a", "b"]})
+        flags = _check_extra_columns(s)
+        assert not any(f.severity == "block" for f in flags)
+
+    def test_unnamed_column_still_warns(self):
+        # Regression: debug-column WARN behavior preserved.
+        s = _make_structured({"Unnamed: 0": [1, 2], "name": ["a", "b"]})
+        flags = _check_extra_columns(s)
+        warns = [f for f in flags if f.severity == "warn"]
+        assert any(f.rule == "extra_columns" for f in warns)
