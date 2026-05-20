@@ -1,17 +1,30 @@
-"""A2 — knowledge.md term → column/entity binding.
+"""A2 — markdown bold-prefix term → column/entity binding.
 
-Parses domain documentation (knowledge.md and similar) for bold-prefixed
-term definitions:
+Deterministic FAST-PATH adapter for documentation written in the
+markdown bold-prefix glossary convention:
 
   ### Section
-  - **term (type):** definition body referencing other columns / synonyms ...
+  - **term**: definition body
+  - **term (type):** definition
+  - **term:** definition
 
-then matches the user's question against (a) the term name itself and
+Matches question entities against (a) the term name itself and
 (b) the definition body. Emits a DOMAIN_BINDINGS block telling the
-planner which knowledge.md terms the question is touching.
+planner which terms the question touches.
 
-Universal across data agents: any benchmark that ships markdown
-documentation can drive this without modification. Zero LLM cost.
+SCOPE — be honest about what this covers:
+- Works on docs that use the `- **term**:` convention (≈ 70 % of KDD
+  knowledge.md files; some Sphinx-style docs; many README/glossary files).
+- Does NOT match heading-section-as-glossary, backtick-prefixed columns,
+  em-dash glossaries, or any prose-only documentation. On such docs A2
+  is silently a no-op — emits no hints, no harm.
+- For format-agnostic coverage, B2 (`dataline/agents/doc_glossary.py`)
+  runs after A2 with one LLM call per task. A2 and B2 are complementary,
+  not redundant: A2 is the 0-LLM fast-path for the common bold-prefix
+  style; B2 is the LLM fallback for any other doc shape.
+
+Zero LLM cost. Where the convention matches, A2 is the cheapest possible
+adapter. Where it doesn't, B2 carries.
 """
 
 from __future__ import annotations
@@ -63,8 +76,13 @@ class TermDef:
 _EXAMPLE_SECTION_RE = re.compile(
     r"^(example|use\s*case|sample|illustration)\b", re.IGNORECASE
 )
+# Meta-term filter — these markdown bold spans are documentation scaffolding
+# in EXAMPLE / USE CASE sections, not domain glossary entries. Note: we do
+# NOT filter "description" here — the pre-v88 audit caught that DABstep's
+# `payments-readme.md` uses **Description** as a legitimate dataset term
+# entry; filtering it produced a false negative.
 _META_TERM_NAMES = frozenset({
-    "metric", "formula", "description", "explanation", "sql", "code", "example",
+    "metric", "formula", "explanation", "sql", "code", "example",
     "use case", "details", "rationale", "note", "notes", "comment",
 })
 

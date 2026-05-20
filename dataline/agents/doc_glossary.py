@@ -81,33 +81,40 @@ EMPTY_GLOSSARY = DocGlossary()
 
 # ── Doc collection ────────────────────────────────────────────────
 
-_DOC_CANDIDATES = (
-    "context/knowledge.md",
-    "knowledge.md",
-)
-
-
+# Universal convention: domain documentation lives under either the task
+# root or a `context/` subdirectory. We treat ANY *.md file directly under
+# these roots (or under a `doc/` subdirectory of either) as a candidate.
+# This is convention-based — not benchmark-specific. KDD's `knowledge.md`
+# and DABstep's `context/manual.md` + `context/payments-readme.md` are
+# both captured by this rule without naming any benchmark explicitly.
 def _collect_doc_files(task_dir: Path) -> list[Path]:
     """Return ordered, deduplicated doc files for a task.
 
-    Order: top-level knowledge.md first, then sorted context/doc/*.md.
-    Style-agnostic: we treat ANY markdown / text under the doc roots as
-    eligible, not just `- **term**:`-shaped content.
+    Scan strategy (universal — no benchmark-specific filename hardcoded):
+      1. `<task_dir>/*.md` (top-level)
+      2. `<task_dir>/context/*.md`
+      3. `<task_dir>/doc/*.md`
+      4. `<task_dir>/context/doc/*.md`
+
+    Style-agnostic at the LLM-extraction layer too: B2's prompt parses any
+    prose / heading / bullet content, not just markdown-bold-prefix terms.
     """
     seen: set[str] = set()
     out: list[Path] = []
-    for rel in _DOC_CANDIDATES:
-        p = task_dir / rel
-        if p.is_file() and str(p.resolve()) not in seen:
-            seen.add(str(p.resolve()))
+    for sub in (task_dir, task_dir / "context", task_dir / "doc", task_dir / "context" / "doc"):
+        if not sub.is_dir():
+            continue
+        for p in sorted(sub.glob("*.md")):
+            rp = str(p.resolve())
+            if rp in seen:
+                continue
+            # Skip Profiler-blacklisted output-convention names (defence in
+            # depth — Profiler already filters these from the manifest).
+            if p.name in {"task.json", "result.json", "step_result.json",
+                          "prediction.csv", "trace.json"}:
+                continue
+            seen.add(rp)
             out.append(p)
-    for sub in (task_dir / "context" / "doc", task_dir / "doc"):
-        if sub.is_dir():
-            for p in sorted(sub.glob("*.md")):
-                rp = str(p.resolve())
-                if rp not in seen:
-                    seen.add(rp)
-                    out.append(p)
     return out
 
 

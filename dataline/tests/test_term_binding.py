@@ -57,12 +57,23 @@ class TestParseKnowledgeTerms:
     def test_meta_term_names_filtered(self):
         md = (
             "### Real Section\n"
-            "- **Description**: The description of something.\n"
+            "- **Formula**: COUNT(x) / COUNT(y)\n"
             "- **actual_column**: Real field.\n"
         )
         terms = parse_knowledge_terms(md)
-        assert all(t.term.lower() != "description" for t in terms)
+        assert all(t.term.lower() != "formula" for t in terms)
         assert any(t.term == "actual_column" for t in terms)
+
+    def test_description_NOT_filtered(self):
+        # Audit fix: 'Description' was previously in META_TERM_NAMES which
+        # produced a false negative on docs (like DABstep payments-readme.md)
+        # where 'Description' is a legitimate dataset-level term entry.
+        md = (
+            "### Dataset\n"
+            "- **Description**: Synthetic dataset of payment transactions.\n"
+        )
+        terms = parse_knowledge_terms(md)
+        assert any(t.term == "Description" for t in terms)
 
 
 # ---- _entity_matches_term ----
