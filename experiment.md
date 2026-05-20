@@ -567,6 +567,47 @@ hypothesis is now strongly supported by 5 independent data points.**
 
 ---
 
+## v87 — A3 + A1 + A2 combined (2026-05-19) — SHIPPED (pending audit)
+
+After the leak-discovery (v85/v86), we shipped three independent
+mechanisms targeting the Qwen-specific failure modes observed in
+Phase 0 SC1 and the v86 heavy-mode trajectories:
+
+| layer | commit | mechanism |
+|---|---|---|
+| A3 | `3d22080` | heavy deliberator strict-majority short-circuit + no-prior prompt |
+| A1 | `edfec0e` | focus_hints — question entity → manifest value match |
+| A2 | `7b4b903` | term_binding — question entity → knowledge.md term match |
+
+| eval | avg | ≥0.9 pass | input | code |
+|---|---|---|---|---|
+| v80 | 0.660 | 33/50 | polluted | original |
+| v85 | 0.630 | 31/50 | polluted | + S1 |
+| v86 | 0.620 | 31/50 | clean | + S1+L1+L2 |
+| **v87** | **0.720** | **35/50** | clean | + S1+L1+L2+A3+A1+A2 |
+
+v87 vs v86: LIFT=6, REGRESS=2, net=+4 → +10pp clean-baseline lift.
+
+Lifts confirmed:
+- task_11, task_25 — A3 majority-vote (also seen in earlier paired tests)
+- task_415 — A3 + A2 ("reference name" → driverRef)
+- task_418 — A1+A2 plausibly helped narrative parse
+- task_22, task_196 — likely variance bounce-back (had been variance
+  regressions in v86)
+- task_163 + task_257 — 0 → 0.5 partial lift
+
+Regressions:
+- task_408 1 → 0 (was an S1-driven lift in v86; variance back to fail)
+- task_80 1 → 0 (no leak; pure variance)
+
+**Caveat:** +10pp on a 50-task eval at temp=0 (but heavy mode has
+temp=0.7 trajectories → real variance source) is unusually high vs
+the ±4-5 noise band. Before declaring "real lift", an independent
+audit must verify no leakage / overfitting was introduced by A1/A2/A3.
+Audit launched 2026-05-19 (see docs/V87_INDEPENDENT_AUDIT.md).
+
+---
+
 ## v85/v86 — Input Hygiene + True Baseline (2026-05-19) — SHIPPED
 
 ### Discovery
