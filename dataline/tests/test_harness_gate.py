@@ -536,6 +536,176 @@ class TestFilterNoEffect:
 # P2: internal-id columns in answer (extra_columns BLOCK)
 # ---------------------------------------------------------------------------
 
+class TestWhereNullGuard:
+    """C1 (#22): LEFT JOIN + WHERE on right-side col without NULL guard.
+
+    Pure SQL semantic principle — three-valued logic. Universal across
+    domains, not benchmark-specific."""
+
+    def _run(self, sql: str):
+        from dataline.agents.harness_gate import _check_sql_static
+        return _check_sql_static(sql, "", QuestionSpec())
+
+    def test_textbook_left_join_filter_fires(self):
+        flags = self._run(
+            "SELECT u.id FROM users u "
+            "LEFT JOIN orders o ON u.id = o.user_id "
+            "WHERE o.status = 'paid'"
+        )
+        assert any(f.rule == "where_null_guard" and f.severity == "warn" for f in flags)
+
+    def test_inner_join_does_not_fire(self):
+        flags = self._run(
+            "SELECT u.id FROM users u "
+            "INNER JOIN orders o ON u.id = o.user_id "
+            "WHERE o.status = 'paid'"
+        )
+        assert not any(f.rule == "where_null_guard" for f in flags)
+
+    def test_null_guard_present_suppresses(self):
+        flags = self._run(
+            "SELECT u.id FROM users u "
+            "LEFT JOIN orders o ON u.id = o.user_id "
+            "WHERE o.status = 'paid' OR o.status IS NULL"
+        )
+        assert not any(f.rule == "where_null_guard" for f in flags)
+
+    def test_where_on_left_side_does_not_fire(self):
+        flags = self._run(
+            "SELECT u.id FROM users u "
+            "LEFT JOIN orders o ON u.id = o.user_id "
+            "WHERE u.name = 'Alice'"  # filter on LEFT table, fine
+        )
+        assert not any(f.rule == "where_null_guard" for f in flags)
+
+    def test_multiple_null_unsafe_ops_each_flagged(self):
+        flags = self._run(
+            "SELECT u.id FROM users u "
+            "LEFT JOIN orders o ON u.id = o.user_id "
+            "WHERE o.status = 'paid' AND o.amount > 100"
+        )
+        # Both o.status and o.amount should each generate one flag
+        njg = [f for f in flags if f.rule == "where_null_guard"]
+        assert len(njg) >= 1  # at least one fires; impl may de-dup
+
+
+class TestTiePossibleTopN:
+    """C2 (#23): top-N tie boundary. Question 'top N' + code 'LIMIT N' →
+    tie at rank N may be silently dropped."""
+
+    def _run(self, q, code, sj):
+        from dataline.agents.harness_gate import _check_tie_possible
+        return _check_tie_possible(QuestionSpec(), q, code, sj)
+
+    def test_top_3_with_limit_3_fires(self):
+        sj = _make_structured({"name": ["a","b","c"], "score": [10,9,8]})
+        flags = self._run(
+            "Give me the top 3 highest-scoring users.",
+            "SELECT name, score FROM users ORDER BY score DESC LIMIT 3",
+            sj,
+        )
+        assert any(f.rule == "tie_possible" for f in flags)
+
+    def test_top_5_pandas_nlargest_fires(self):
+        sj = _make_structured({"name": list("abcde")})
+        flags = self._run(
+            "What are the top 5 largest cities?",
+            "df.nlargest(5, 'population')",
+            sj,
+        )
+        assert any(f.rule == "tie_possible" for f in flags)
+
+    def test_top_n_with_dense_rank_does_not_fire(self):
+        # Code uses DENSE_RANK without LIMIT — proper tie handling.
+        sj = _make_structured({"name": list("abc")})
+        flags = self._run(
+            "Top 3 by score.",
+            "SELECT name FROM (SELECT name, DENSE_RANK() OVER (ORDER BY score DESC) AS r FROM users) t WHERE r <= 3",
+            sj,
+        )
+        assert not any(f.rule == "tie_possible" for f in flags)
+
+    def test_top_n_row_count_mismatch_does_not_fire(self):
+        # Code used LIMIT but result has != N rows — already detects
+        # something else upstream; tie rule shouldn't fire.
+        sj = _make_structured({"name": list("ab")})  # 2 rows, not 3
+        flags = self._run(
+            "Top 3 by score.",
+            "SELECT name FROM users ORDER BY score DESC LIMIT 3",
+            sj,
+        )
+        assert not any(f.rule == "tie_possible" for f in flags)
+
+    def test_top_1_keeps_single_row_branch(self):
+        # 'top 1' = highest 1 → handled by original single-row branch via
+        # _TIE_QUESTION_PATTERNS keyword match
+        sj = _make_structured({"name": ["a"]})
+        flags = self._run(
+            "Who is the highest scorer?",
+            "SELECT name FROM users ORDER BY score DESC LIMIT 1",
+            sj,
+        )
+        assert any(f.rule == "tie_possible" for f in flags)
+
+
+class TestCountDistinctNeeded:
+    """C3 (#24): question asks for different/unique/distinct count but
+    code uses non-deduplicating count. Dual-language: SQL + pandas."""
+
+    def _run(self, q, code):
+        from dataline.agents.harness_gate import _check_count_distinct_needed
+        return _check_count_distinct_needed(q, code)
+
+    def test_unique_question_count_star_fires(self):
+        flags = self._run(
+            "How many unique customers placed orders?",
+            "SELECT COUNT(*) FROM orders",
+        )
+        assert any(f.rule == "count_distinct_needed" for f in flags)
+
+    def test_different_question_pandas_len_fires(self):
+        flags = self._run(
+            "How many different products were sold?",
+            "result = len(df_sales)",
+        )
+        assert any(f.rule == "count_distinct_needed" for f in flags)
+
+    def test_distinct_question_with_count_distinct_passes(self):
+        flags = self._run(
+            "How many distinct cities are represented?",
+            "SELECT COUNT(DISTINCT city) FROM users",
+        )
+        assert not any(f.rule == "count_distinct_needed" for f in flags)
+
+    def test_distinct_question_with_nunique_passes(self):
+        flags = self._run(
+            "Count of unique cities?",
+            "df['city'].nunique()",
+        )
+        assert not any(f.rule == "count_distinct_needed" for f in flags)
+
+    def test_distinct_question_with_drop_duplicates_passes(self):
+        flags = self._run(
+            "How many different products?",
+            "len(df.drop_duplicates(subset=['product_id']))",
+        )
+        assert not any(f.rule == "count_distinct_needed" for f in flags)
+
+    def test_no_distinct_keyword_does_not_fire(self):
+        flags = self._run(
+            "How many orders were placed?",
+            "SELECT COUNT(*) FROM orders",
+        )
+        assert not any(f.rule == "count_distinct_needed" for f in flags)
+
+    def test_set_python_usage_passes(self):
+        flags = self._run(
+            "How many unique users?",
+            "users = set(df['user_id']); print(len(users))",
+        )
+        assert not any(f.rule == "count_distinct_needed" for f in flags)
+
+
 class TestInternalIdColumnBlock:
     """Catches v92 task_330: pred had `home_team_api_id`, `away_team_api_id`
     leaking as columns alongside the legitimate answer. These are universal

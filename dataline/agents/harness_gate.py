@@ -1094,6 +1094,18 @@ _LIMIT1_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
+# C2 (#23): "top N" / "highest N" / "lowest N" — ties at rank N boundary
+# can be silently dropped by LIMIT N / nlargest(N) / etc.
+_TOP_N_QUESTION_RE = re.compile(
+    r"\b(?:top|highest|lowest|largest|smallest|best|worst|first|last)\s+(\d+)\b",
+    re.IGNORECASE,
+)
+_LIMIT_N_PATTERNS = re.compile(
+    r"LIMIT\s+(\d+)\b|\.head\(\s*(\d+)\s*\)|"
+    r"\.nsmallest\(\s*(\d+)|\.nlargest\(\s*(\d+)",
+    re.IGNORECASE,
+)
+
 
 def _check_tie_possible(
     spec: QuestionSpec,
@@ -1101,40 +1113,130 @@ def _check_tie_possible(
     code: str,
     structured_json: str,
 ) -> list[HarnessFlag]:
-    """Rule 14: warn when a tie-possible question returns exactly 1 row.
+    """Rule 14: warn when a tie-possible question returns truncated rows.
 
-    Fires when:
-    - QuestionSpec marks tie_possible=True (from QuestionAnalyzer), OR
-    - Question text contains min/max/lowest/highest keywords
-    AND answer has exactly 1 row.
+    Two branches:
 
-    Guides PlannerCoder to use RANK() or WHERE col = (SELECT MIN/MAX ...)
-    instead of LIMIT 1 so tied values are not silently dropped.
+    1. Single-row branch (original):
+       Question has min/max/lowest/highest, answer has exactly 1 row,
+       code used LIMIT 1 / head(1) / etc. — tie at the extremum may
+       have been dropped.
+
+    2. Top-N branch (C2 extension, #23):
+       Question says "top N" / "highest N" / "lowest N" (with N > 1),
+       answer has exactly N rows, code used LIMIT N or nlargest(N) etc.
+       — tie at the rank-N boundary may have been dropped.
+
+    Guides PlannerCoder to use RANK() / DENSE_RANK() or
+    `WHERE col >= (SELECT MIN(...) FROM (SELECT ... ORDER BY col DESC LIMIT N))`
+    so tied values at the cutoff aren't silently lost. Universal SQL
+    semantic — not benchmark-specific.
     """
+    flags: list[HarnessFlag] = []
+
+    # --- Branch 1: existing single-row tie check ---
     tie_flagged = spec.tie_possible
     if not tie_flagged:
         q_lower = question.lower()
         tie_flagged = any(re.search(p, q_lower) for p in _TIE_QUESTION_PATTERNS)
 
-    if not tie_flagged:
-        return []
-
     data_rows = _count_answer_rows(structured_json)
-    if data_rows is None or data_rows != 1:
-        return []
 
-    # Only warn when code used LIMIT 1 or similar — avoids false positives
-    # when the data genuinely has a single extreme value
-    if not _LIMIT1_PATTERNS.search(code):
-        return []
+    if tie_flagged and data_rows == 1 and _LIMIT1_PATTERNS.search(code):
+        flags.append(HarnessFlag(
+            rule="tie_possible",
+            severity="warn",
+            message=(
+                "Min/max question returned 1 row via LIMIT 1 / head(1) — ties may exist. "
+                "Replace LIMIT 1 with WHERE col = (SELECT MIN/MAX(col) FROM ...) "
+                "or use RANK() OVER (...) to capture all tied values."
+            ),
+        ))
 
+    # --- Branch 2: top-N tie check (C2) ---
+    top_n_match = _TOP_N_QUESTION_RE.search(question)
+    if top_n_match:
+        n_question = int(top_n_match.group(1))
+        if n_question > 1 and data_rows == n_question:
+            # Code used LIMIT N or equivalent?
+            limit_match = _LIMIT_N_PATTERNS.search(code)
+            n_code = None
+            if limit_match:
+                groups = [g for g in limit_match.groups() if g is not None]
+                if groups:
+                    n_code = int(groups[0])
+            if n_code == n_question:
+                flags.append(HarnessFlag(
+                    rule="tie_possible",
+                    severity="warn",
+                    message=(
+                        f"Question asks for top {n_question} but code used "
+                        f"LIMIT {n_code} / nlargest({n_code}) — ties at the "
+                        f"rank-{n_question} boundary may have been dropped. "
+                        f"Use DENSE_RANK() OVER (ORDER BY col DESC) <= {n_question}, "
+                        f"or fetch all rows with col >= (the N-th value) to include ties."
+                    ),
+                ))
+
+    return flags
+
+
+# ---------------------------------------------------------------------------
+# C3 (Rule 14b): "different/unique/distinct" + COUNT(*) missing DISTINCT
+#
+# Universal set-vs-multiset semantic: when a question asks for the count
+# of DIFFERENT/UNIQUE/DISTINCT values, the correct cardinality is set
+# cardinality, not row cardinality. SQL COUNT(*) counts rows; pandas
+# len(df) / df.shape[0] does the same. Both can over-count when the
+# underlying column repeats.
+#
+# Dual-language detection — neither SQL-only nor Python-only:
+#   - SQL: COUNT(DISTINCT col) or DISTINCT in SELECT
+#   - Pandas: .nunique(), .drop_duplicates(), set(...), .unique()
+# Either form satisfies the rule; neither → WARN.
+# ---------------------------------------------------------------------------
+
+_DISTINCT_QUESTION_RE = re.compile(
+    r"\b(?:how\s+many\s+(?:different|unique|distinct)|"
+    r"number\s+of\s+(?:different|unique|distinct)|"
+    r"count\s+(?:of\s+)?(?:different|unique|distinct))\b",
+    re.IGNORECASE,
+)
+
+_DISTINCT_CODE_PATTERNS = (
+    re.compile(r"\bCOUNT\s*\(\s*DISTINCT\b", re.IGNORECASE),  # SQL
+    re.compile(r"\bSELECT\s+DISTINCT\b", re.IGNORECASE),       # SQL
+    re.compile(r"\.nunique\s*\("),                             # pandas
+    re.compile(r"\.drop_duplicates\s*\("),                     # pandas
+    re.compile(r"\.unique\s*\(\s*\)"),                         # pandas
+    re.compile(r"\bset\s*\("),                                 # python set()
+)
+
+
+def _check_count_distinct_needed(
+    question: str,
+    code: str,
+) -> list[HarnessFlag]:
+    """Rule 14b: question says different/unique/distinct but code uses
+    a count form that doesn't deduplicate. Fires when both:
+      - question matches _DISTINCT_QUESTION_RE
+      - none of _DISTINCT_CODE_PATTERNS appear in code
+
+    WARN-only. Universal SQL/pandas semantic, dual-language detection.
+    """
+    if not _DISTINCT_QUESTION_RE.search(question):
+        return []
+    if any(p.search(code) for p in _DISTINCT_CODE_PATTERNS):
+        return []  # code already deduplicates
     return [HarnessFlag(
-        rule="tie_possible",
+        rule="count_distinct_needed",
         severity="warn",
         message=(
-            "Min/max question returned 1 row via LIMIT 1 / head(1) — ties may exist. "
-            "Replace LIMIT 1 with WHERE col = (SELECT MIN/MAX(col) FROM ...) "
-            "or use RANK() OVER (...) to capture all tied values."
+            "Question asks for a count of different/unique/distinct values "
+            "but the code uses a non-deduplicating count. "
+            "SQL: use COUNT(DISTINCT col). "
+            "Pandas: use df[col].nunique() or len(df[col].drop_duplicates()). "
+            "Otherwise repeated rows inflate the count."
         ),
     )]
 
@@ -1210,6 +1312,12 @@ def _check_sql_static(
     # --- Check WHERE literals against DISTINCT values ---
     try:
         _check_where_literals(stmt, data_profile, flags)
+    except Exception:
+        pass  # fail-open
+
+    # --- C1: LEFT JOIN + WHERE on right-side col without NULL guard ---
+    try:
+        _check_left_join_null_guard(stmt, flags)
     except Exception:
         pass  # fail-open
 
@@ -1319,6 +1427,105 @@ def _check_where_literals(stmt, data_profile: str, flags: list[HarnessFlag]) -> 
 
 
 # ---------------------------------------------------------------------------
+# C1 (Rule 15c): LEFT JOIN + WHERE without NULL guard
+#
+# SQL textbook gotcha: LEFT [OUTER] JOIN preserves the left side; unmatched
+# rows on the right side become NULL. A subsequent `WHERE right.col = X` then
+# silently filters out those unmatched rows because three-valued logic says
+# `NULL = X` evaluates to UNKNOWN (not TRUE). The query effectively behaves
+# like an INNER JOIN — almost always not what the author intended when they
+# wrote LEFT JOIN.
+#
+# Fix is one of:
+#   - LEFT JOIN with the predicate moved into the ON clause, OR
+#   - `WHERE right.col = X OR right.col IS NULL`, OR
+#   - INNER JOIN if the unmatched rows shouldn't appear anyway.
+#
+# WARN-only (not BLOCK) — sometimes the INNER-JOIN semantics IS what was
+# wanted, and the WARN message points the planner at the canonical fix.
+# Universal SQL semantic principle, not benchmark-specific.
+# ---------------------------------------------------------------------------
+
+
+def _check_left_join_null_guard(stmt, flags: list[HarnessFlag]) -> None:
+    """Detect LEFT JOIN <right> ... WHERE <right>.<col> <op> <literal>
+    where <op> is one that does NOT match NULL (=, !=, >, <, IN, LIKE, ...),
+    and the WHERE clause does not also include `IS NULL` on the same column.
+    """
+    from sqlglot import exp
+
+    # Map alias/name → "is from a LEFT JOIN right-side"
+    left_joined: dict[str, bool] = {}
+    for join in stmt.find_all(exp.Join):
+        side = (join.side or "").upper()
+        kind = (join.kind or "").upper()
+        # sqlglot models LEFT/RIGHT/FULL as side="LEFT" etc.; treat OUTER same.
+        if side == "LEFT" or (kind == "OUTER" and side == "LEFT"):
+            t = join.this
+            if isinstance(t, exp.Table):
+                # Use alias if present, else table name
+                alias = (t.alias_or_name or "").lower()
+                if alias:
+                    left_joined[alias] = True
+
+    if not left_joined:
+        return
+
+    where = stmt.args.get("where")
+    if where is None:
+        return
+
+    # Collect columns referenced in WHERE that are guarded by IS NULL anywhere
+    null_guarded: set[tuple[str, str]] = set()
+    for is_null in where.find_all(exp.Is):
+        # Pattern: col IS NULL  →  this=Column, expression=Null
+        left = is_null.this
+        right = is_null.args.get("expression")
+        if isinstance(left, exp.Column) and isinstance(right, exp.Null):
+            tbl = (left.table or "").lower()
+            col = (left.name or "").lower()
+            if tbl and col:
+                null_guarded.add((tbl, col))
+
+    # NULL-incompatible operators (don't match NULL by 3-valued logic)
+    null_unsafe_ops = (
+        exp.EQ, exp.NEQ, exp.GT, exp.LT, exp.GTE, exp.LTE,
+        exp.Like, exp.ILike, exp.In,
+    )
+
+    flagged_cols: set[tuple[str, str]] = set()
+    for op in where.find_all(*null_unsafe_ops):
+        # The column reference can be on either side of the op.
+        for side in (op.this, op.args.get("expression"), op.args.get("expressions")):
+            if side is None:
+                continue
+            candidates = side if isinstance(side, list) else [side]
+            for c in candidates:
+                if not isinstance(c, exp.Column):
+                    continue
+                tbl = (c.table or "").lower()
+                col = (c.name or "").lower()
+                if not tbl or not col:
+                    continue
+                if tbl in left_joined and (tbl, col) not in null_guarded:
+                    flagged_cols.add((tbl, col))
+
+    for tbl, col in sorted(flagged_cols):
+        flags.append(HarnessFlag(
+            rule="where_null_guard",
+            severity="warn",
+            message=(
+                f"WHERE references {tbl}.{col} where {tbl} is LEFT JOIN'd. "
+                f"By SQL three-valued logic, unmatched rows (where {tbl}.* "
+                f"is NULL) will be filtered out — the LEFT JOIN behaves like "
+                f"an INNER JOIN. Either move the predicate into the ON clause, "
+                f"add `OR {tbl}.{col} IS NULL`, or switch to INNER JOIN if "
+                f"unmatched rows shouldn't appear in the result."
+            ),
+        ))
+
+
+# ---------------------------------------------------------------------------
 # Escalation policy
 # ---------------------------------------------------------------------------
 
@@ -1385,6 +1592,9 @@ def check(
 
     # Tie-possible check
     flags.extend(_check_tie_possible(spec, question, code, structured_json))
+
+    # C3 (#24): count-distinct dual-language check
+    flags.extend(_check_count_distinct_needed(question, code))
 
     # SQL static analysis (fail-open) — must run BEFORE filter_no_effect so
     # the latter can detect a combined sql_where_value + scalar-zero pattern.
