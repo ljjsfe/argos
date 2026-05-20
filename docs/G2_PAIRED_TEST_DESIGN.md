@@ -168,15 +168,71 @@ Result must be inserted as Section 9 below, with actual numbers from Arm A/B.
 
 ---
 
-## 9. Results (to be filled after run)
+## 9. Results (executed 2026-05-20)
 
-_PENDING — fill after paired-test runs._
+**Arm A**: `results/g2_paired_A_20260520_1310` (baseline planner_coder.md, 15 tasks ran; task_140 silently skipped)
+**Arm B**: `results/g2_paired_B_20260520_1328` (with G2 prompt diff, 15 tasks ran; task_140 silently skipped)
 
-| | Predicted | Actual | Hit? |
+### Per-task delta table
+
+| Set | Task | Arm A | Arm B | Delta |
+|-----|------|-------|-------|-------|
+| TGT | task_80 | 0.00 | 0.00 | +0.00 |
+| TGT | task_89 | 0.00 | 0.00 | +0.00 |
+| TGT | task_180 | 0.00 | 0.00 | +0.00 |
+| TGT | task_249 | 1.00 | 1.00 | +0.00 |
+| TGT | task_344 | 0.00 | 0.00 | +0.00 |
+| TGT | task_352 | 0.00 | 0.00 | +0.00 |
+| TGT | task_396 | 0.00 | 0.00 | +0.00 |
+| TGT | task_418 | 0.00 | 0.00 | +0.00 |
+| CTRL | task_11 | 1.00 | 0.00 | **-1.00** |
+| CTRL | task_25 | 1.00 | 1.00 | +0.00 |
+| CTRL | task_38 | 1.00 | 1.00 | +0.00 |
+| CTRL | task_257 | 0.00 | 0.50 | +0.50 |
+| CTRL | task_283 | 1.00 | 0.00 | **-1.00** |
+| CTRL | task_330 | 1.00 | 1.00 | +0.00 |
+| CTRL | task_408 | 1.00 | 1.00 | +0.00 |
+
+### Prediction vs actual
+
+| Metric | Predicted | Actual | Hit? |
 |---|---|---|---|
-| Target net | +2.5 ± 0.5 | TBD | TBD |
-| Control net | 0 ± 0.5 | TBD | TBD |
-| Decision | TBD | TBD | TBD |
+| Target net | +2.5 ± 0.5 | **+0.00** | ❌ MISS |
+| Control net | 0 ± 0.5 | **-1.50** | ❌ MISS |
+| {352, 396, 418} flips | 2-3 of 3 → ≥0.5 | 0 of 3 | ❌ MISS |
+| Decision | TBD | **REJECT** | — |
+
+### Why REJECT
+
+Two independent failures:
+
+1. **Target had zero lift** — none of the 8 target tasks moved. The hint did not prevent the early-iter filter mistakes it was designed to prevent. task_249 was already 1.0 in both arms (not a target hit). Task_418 (extreme) ran in Arm B but stayed at 0 same as Arm A.
+
+2. **Control regressed -1.5** — two previously-perfect tasks broke. task_11 (easy lookup) and task_283 (medium aggregation) both flipped 1.0 → 0.0 in Arm B. This is precisely the v94-class LLM variance amplification: the prompt change shifted Planner reasoning paths on tasks that didn't need it. The one positive control delta (task_257 +0.5) is in the noise band — it varies between 0.0 and 0.5 across recent runs.
+
+### Hypothesis falsification
+
+H1 (proactive prevention) is **falsified**. The hint either:
+- Was not read by Planner (too far down the prompt, or context overflow)
+- Was read but produced no behavioral change on targets
+- Caused interference on control tasks via increased reasoning chain length
+
+### What this teaches
+
+v94 lesson reconfirmed: **prompt-level subtractive/additive changes amplify LLM variance even when adding what looks like helpful guidance**. The 3B-active Qwen model is sensitive to prompt structure shifts; new instructions don't necessarily produce the intended behavior and can break working flows.
+
+The G2 root cause analysis (P1 fires too late in iter budget) is still valid — but the fix is not "add upfront hint to planner". Possible alternative fixes (NOT to be attempted without separate paired test):
+
+1. Inject hint via ContextManager only when QuestionSpec says "aggregation with filter" — narrower scope.
+2. Strengthen P1's harness message so the planner gets a clearer instruction on the retry iter (deferred — needs separate design).
+3. Accept the limitation — P1 catches Cluster A scalar-zero shape but Planner often can't recover within iter budget. Cluster A may need a different architectural lever (e.g. better domain knowledge extraction, not prompt change).
+
+### Action
+
+- **Reverted** the prompt diff (`git checkout dataline/prompts/planner_coder.md`).
+- **No production code change**. Design doc retained as falsification record.
+- Cost spent: ~$16 (2 × 15-task subset).
+- Time spent: ~25 min wall.
 
 ---
 
