@@ -246,6 +246,7 @@ def run_task_heavy(
         llm=deliberator_llm,
         domain_rules=domain_rules,
         seed=heavy_cfg.get("deliberator_shuffle_seed"),
+        tolerance=heavy_cfg.get("tolerance", "kdd_2dp"),
     )
     deliberator_usage = deliberator_llm.total_usage
 

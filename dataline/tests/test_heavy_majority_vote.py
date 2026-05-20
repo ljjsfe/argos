@@ -72,6 +72,34 @@ class TestNormalizeCsv:
         # Header dropped, sig should reflect 2 columns.
         assert sig.startswith("cols=2")
 
+    def test_exact_mode_keeps_header(self):
+        sig = _normalize_csv("Country\nUSA", tolerance="exact")
+        assert "header=country" in sig
+
+    def test_exact_mode_no_rounding(self):
+        # Under exact, 2.7273 and 2.73 must NOT collapse to the same sig.
+        a = _normalize_csv("ratio\n2.7273", tolerance="exact")
+        b = _normalize_csv("ratio\n2.73", tolerance="exact")
+        assert a != b
+
+    def test_kdd_mode_rounds(self):
+        # Under kdd_2dp (default), 2.7273 and 2.73 ARE the same.
+        a = _normalize_csv("ratio\n2.7273")
+        b = _normalize_csv("ratio\n2.73")
+        assert a == b
+
+    def test_exact_mode_different_header_names_differ(self):
+        # Two CSVs with same data but different headers should NOT match
+        # under exact tolerance (DABstep-style scoring).
+        a = _normalize_csv("Country\nUSA", tolerance="exact")
+        b = _normalize_csv("country\nUSA", tolerance="exact")
+        # Note: both headers lowercase to 'country' so they DO match —
+        # exact mode is whitespace+case-normalised, not byte-exact.
+        assert a == b
+        # But a real header difference (column name) WILL differ.
+        c = _normalize_csv("name\nUSA", tolerance="exact")
+        assert c != a
+
 
 # ---- _majority_vote ----
 

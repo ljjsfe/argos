@@ -34,29 +34,30 @@ _MAX_ANSWER_CHARS = 1500
 _MAX_REASONING_CHARS = 500
 
 
-def _normalize_csv(text: str) -> str:
-    """Canonical form for comparing two CSV answers.
+_TOLERANCE_KDD = "kdd_2dp"
+_TOLERANCE_EXACT = "exact"
 
-    Currently calibrated to the KDD scorer (column NAMES ignored, numeric
-    cells round to 2dp). The 2dp tolerance is KDD-specific — other
-    benchmarks (e.g. DABstep) require exact match. A future change should
-    parameterise tolerance via config (see TODO in heavy_deliberator notes).
 
-    TODO (P6 generalisation): expose `tolerance="kdd_2dp" | "exact"` and
-    `ignore_headers` as args, drive from config.yaml `heavy_mode.tolerance`,
-    default to "kdd_2dp" until benchmark-specific configs exist. Done as
-    part of the A1/A2/A3 universalisation pass after B2 ships.
+def _normalize_csv(text: str, *, tolerance: str = _TOLERANCE_KDD) -> str:
+    """Canonical form for comparing two CSV answers under a chosen tolerance.
 
-    Canonicalisation:
-      1. drop the header row
-      2. drop fully-blank / all-whitespace / all-empty-cell rows
-         (avoids the empty-string false-majority bug observed on task_352
-         where two trajectories produced `ratio\n""\n` and the empty
-         data row caused a spurious majority match)
-      3. sort the remaining data rows
-      4. lower-case + strip cells; numeric cells round to 2dp
-      5. prefix signature with `cols=N` so a 1-col answer can't match a
-         2-col answer with the same values
+    Tolerance modes (controlled by config.yaml `heavy_mode.tolerance`):
+
+      kdd_2dp (default — KDD scorer)
+        - drop header row (column NAMES ignored)
+        - round numerics to 2 decimal places
+        - lowercase strings, strip whitespace
+        - normalise '""' / "''" / 'none' / 'nan' → empty
+
+      exact (e.g. DABstep)
+        - KEEP header row (column NAMES matter)
+        - NO numeric rounding (string-equality on cells)
+        - lowercase strings, strip whitespace
+        - normalise '""' / "''" / 'none' / 'nan' → empty
+
+    Both modes drop fully-blank / all-empty data rows (avoids the
+    empty-string false-majority bug observed on task_352) and prefix the
+    signature with `cols=N` so a 1-col answer can't match a 2-col one.
 
     Empty / data-empty answer → "" (cannot win the majority).
     """
@@ -65,7 +66,15 @@ def _normalize_csv(text: str) -> str:
     lines = [ln.rstrip() for ln in text.strip().splitlines() if ln.strip()]
     if len(lines) < 2:
         return ""  # header only
-    data_rows = lines[1:]
+
+    if tolerance == _TOLERANCE_EXACT:
+        header = lines[0].strip().lower()
+        data_rows = lines[1:]
+        preamble = f"header={header}\n"
+    else:
+        header = None  # KDD: ignore header names
+        data_rows = lines[1:]
+        preamble = ""
 
     norm_rows: list[str] = []
     n_cols: int | None = None
@@ -75,18 +84,20 @@ def _normalize_csv(text: str) -> str:
         any_nonblank = False
         for cell in raw_cells:
             c = cell.strip().lower()
-            # Treat literal empty quotes as empty.
             if c in ('""', "''", "none", "nan"):
                 c = ""
             if c:
                 any_nonblank = True
-            try:
-                cells.append(f"{round(float(c), 2):.2f}")
-                any_nonblank = True
-            except ValueError:
-                cells.append(c)
+            if tolerance == _TOLERANCE_KDD:
+                try:
+                    cells.append(f"{round(float(c), 2):.2f}")
+                    any_nonblank = True
+                    continue
+                except ValueError:
+                    pass
+            cells.append(c)
         if not any_nonblank:
-            continue  # skip all-empty rows — they are not real data
+            continue
         if n_cols is None:
             n_cols = len(raw_cells)
         norm_rows.append(",".join(cells))
@@ -94,10 +105,12 @@ def _normalize_csv(text: str) -> str:
     if not norm_rows or n_cols is None:
         return ""
     norm_rows.sort()
-    return f"cols={n_cols}\n" + "\n".join(norm_rows)
+    return f"{preamble}cols={n_cols}\n" + "\n".join(norm_rows)
 
 
-def _majority_vote(trajectories: list[HeavyTrajectory]) -> "HeavyTrajectory | None":
+def _majority_vote(
+    trajectories: list[HeavyTrajectory], *, tolerance: str = _TOLERANCE_KDD,
+) -> "HeavyTrajectory | None":
     """If a strict majority of trajectories share the same normalized answer,
     return one of them. Otherwise return None (fall through to LLM).
 
@@ -113,7 +126,7 @@ def _majority_vote(trajectories: list[HeavyTrajectory]) -> "HeavyTrajectory | No
         return None
     sig_to_trajs: dict[str, list[HeavyTrajectory]] = {}
     for t in trajectories:
-        sig = _normalize_csv(t.final_answer_csv)
+        sig = _normalize_csv(t.final_answer_csv, tolerance=tolerance)
         if not sig:
             continue
         sig_to_trajs.setdefault(sig, []).append(t)
@@ -134,6 +147,7 @@ def deliberate(
     domain_rules: str = "",
     prompt_path: Path | None = None,
     seed: int | None = None,
+    tolerance: str = _TOLERANCE_KDD,
 ) -> HeavyDecision:
     """Synthesize K trajectories into one final answer.
 
@@ -169,7 +183,7 @@ def deliberate(
     # invent training-data "knowledge" that contradicts what the data
     # actually shows (e.g. inventing a sports-history fact that overrides
     # 2/3 correct trajectories).
-    majority = _majority_vote(trajectories)
+    majority = _majority_vote(trajectories, tolerance=tolerance)
     if majority is not None:
         return HeavyDecision(
             final_answer_csv=majority.final_answer_csv,
