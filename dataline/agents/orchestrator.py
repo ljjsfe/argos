@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -270,15 +271,22 @@ def run_task(
             _log(trace, "focus_hints", f"skipped: {e}")
 
         # ─── Stage 3c'': Domain bindings — question entity → knowledge.md term ───
-        try:
-            from .term_binding import build_domain_bindings
-            _db = build_domain_bindings(question, task_dir, manifest)
-            if _db:
-                state = set_domain_bindings(state, _db)
-                _log(trace, "domain_bindings", f"{_db.count(chr(10))+1} bindings generated")
-                obs["domain_bindings_lines"] = _db.count("\n") + 1
-        except Exception as e:
-            _log(trace, "domain_bindings", f"skipped: {e}")
+        # A2 is style-tied (KDD bold-prefix markdown). B2 (Stage 3c''') is the
+        # universal LLM-extracted replacement. Set DATALINE_DISABLE_A2=1 to
+        # ablate A2 and isolate B2's contribution in a paired eval. Default
+        # is on — production behaviour preserved unless flag is set.
+        if os.environ.get("DATALINE_DISABLE_A2") != "1":
+            try:
+                from .term_binding import build_domain_bindings
+                _db = build_domain_bindings(question, task_dir, manifest)
+                if _db:
+                    state = set_domain_bindings(state, _db)
+                    _log(trace, "domain_bindings", f"{_db.count(chr(10))+1} bindings generated")
+                    obs["domain_bindings_lines"] = _db.count("\n") + 1
+            except Exception as e:
+                _log(trace, "domain_bindings", f"skipped: {e}")
+        else:
+            _log(trace, "domain_bindings", "disabled by DATALINE_DISABLE_A2=1")
 
         # ─── Stage 3c''': B2 doc glossary (LLM-extracted, format-agnostic) ───
         # Universal replacement for A2's markdown-bold-prefix parser. ONE LLM
