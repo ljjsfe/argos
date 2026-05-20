@@ -64,6 +64,11 @@ def set_focus_hints(state: AnalysisState, hints: str) -> AnalysisState:
     return replace(state, focus_hints=hints)
 
 
+def set_domain_bindings(state: AnalysisState, bindings: str) -> AnalysisState:
+    """Return new state with domain_bindings (question-entity↔knowledge.md term) set."""
+    return replace(state, domain_bindings=bindings)
+
+
 def compress_manifest(manifest: Manifest) -> str:
     """Compress manifest to rich schema context.
 

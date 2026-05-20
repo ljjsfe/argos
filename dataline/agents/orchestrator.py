@@ -31,6 +31,7 @@ from ..core.sandbox import Sandbox
 from ..core.state import (
     add_step,
     create_initial_state,
+    set_domain_bindings,
     set_focus_hints,
     set_playbook_hints,
     set_question_analysis,
@@ -266,6 +267,17 @@ def run_task(
                 obs["focus_hints_lines"] = _fh.count("\n") + 1
         except Exception as e:
             _log(trace, "focus_hints", f"skipped: {e}")
+
+        # ─── Stage 3c'': Domain bindings — question entity → knowledge.md term ───
+        try:
+            from .term_binding import build_domain_bindings
+            _db = build_domain_bindings(question, task_dir, manifest)
+            if _db:
+                state = set_domain_bindings(state, _db)
+                _log(trace, "domain_bindings", f"{_db.count(chr(10))+1} bindings generated")
+                obs["domain_bindings_lines"] = _db.count("\n") + 1
+        except Exception as e:
+            _log(trace, "domain_bindings", f"skipped: {e}")
 
         # ─── Stage 3d: Playbook retrieval (curated patterns, zero LLM) ───
         # Fail-soft: missing/empty playbook → no hints, no behavior change.

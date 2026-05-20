@@ -273,6 +273,24 @@ def _build_context_managed_prompt(
             heading="",
         ))
 
+    # Domain bindings — deterministic question-entity → knowledge.md term.
+    # Anchors question vocabulary against the documentation glossary so the
+    # planner understands which domain concept each question phrase refers
+    # to. Complement to focus_hints (which anchors to data values).
+    if state.domain_bindings:
+        sections.append(Section(
+            name="domain_bindings",
+            content=(
+                f"## Domain Bindings (question phrase → knowledge.md term)\n"
+                f"{state.domain_bindings}\n\n"
+                f"Use these terms' definitions in the Domain Knowledge "
+                f"section below when interpreting the question."
+            ),
+            priority=91,
+            compressible=False,
+            heading="",
+        ))
+
     # Data manifest (rich schema with DISTINCT values, sample rows)
     sections.append(Section(
         name="manifest",
