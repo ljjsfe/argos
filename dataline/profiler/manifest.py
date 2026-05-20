@@ -87,7 +87,10 @@ def scan(task_dir: str) -> Manifest:
     entries: list[ManifestEntry] = []
     skipped: list[tuple[str, str]] = []
 
-    for root, _dirs, files in os.walk(task_dir_abs):
+    for root, dirs, files in os.walk(task_dir_abs):
+        # Skip dot-directories (e.g., .dataline_cache, .git, .ipynb_checkpoints)
+        # in-place modify dirs so os.walk doesn't descend into them.
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
         for fname in sorted(files):
             if fname.startswith("."):
                 continue

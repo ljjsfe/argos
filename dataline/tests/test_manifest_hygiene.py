@@ -146,6 +146,29 @@ class TestScanBlacklist:
         assert paths == {"context/csv/x.csv"}
 
 
+class TestScanDotDirs:
+    """Profiler must not descend into dot-directories (e.g., self-created
+    .dataline_cache or external .git, .ipynb_checkpoints).
+
+    This is the L3.5 defence against the audit-found self-pollution loop:
+    B2 cache writes used to land inside task_dir; the NEXT scan would then
+    read those JSON files back as "inputs" and feed them to the planner.
+    """
+
+    def test_dotdir_contents_skipped(self, tmp_path):
+        _write(tmp_path / "task.json", "{}")
+        _write(tmp_path / "context/csv/x.csv", "a\n1\n")
+        # Simulate a cache directory left over from a prior run.
+        _write(tmp_path / ".dataline_cache/doc_glossary/abc.json", '{"glossary":{}}')
+        _write(tmp_path / ".git/HEAD", "ref: refs/heads/main")
+        _write(tmp_path / ".ipynb_checkpoints/x-checkpoint.csv", "a\n1\n")
+        manifest = scan(str(tmp_path))
+        paths = {Path(e.file_path).relative_to(tmp_path).as_posix() for e in manifest.entries}
+        # Only the legitimate input file should remain — nothing under a
+        # dot-directory should ever be entered.
+        assert paths == {"context/csv/x.csv"}
+
+
 class TestScanEmptyDb:
     def test_zero_byte_db(self, tmp_path):
         _write(tmp_path / "task.json", "{}")

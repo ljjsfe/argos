@@ -285,6 +285,51 @@ class TestCollect:
         assert "[truncated]" in text
 
 
+# ── cache LOCATION hygiene (audit 2026-05-19) ────────────────────
+
+
+class TestCacheLocation:
+    """The B2 cache MUST NOT live inside task_dir.
+
+    The 2026-05-19 audit found that writing cache files into `task_dir`
+    caused Profiler to re-scan them as inputs on subsequent runs, leading
+    to self-injected info pollution across all 50 KDD task inputs.
+    """
+
+    def test_cache_writes_outside_task_dir(self, tmp_path, monkeypatch):
+        # Redirect the module-level cache root to an isolated tmp dir so
+        # this test does not pollute the real .dataline_cache/.
+        import dataline.agents.doc_glossary as dg
+        cache_root = tmp_path / "fake_repo_cache" / "doc_glossary"
+        monkeypatch.setattr(dg, "_REPO_ROOT_CACHE", cache_root)
+
+        task_dir = tmp_path / "task"
+        _write_doc(task_dir)
+        (task_dir / "task.json").write_text('{"task_id":"t","question":"?"}')
+
+        llm = _FakeLLM({
+            "schema_version": SCHEMA_VERSION,
+            "source_files": ["context/knowledge.md"],
+            "terms": [{
+                "name": "Foo", "aliases": [], "definition": ".",
+                "data_field": {"table_or_file": None, "column": None},
+                "value_enum": [], "value_range": None, "source_section": "",
+            }],
+            "formulas": [], "rules": [], "synonyms": [],
+        })
+        extract_doc_glossary(str(task_dir), None, llm)
+
+        # The cache file must land in our redirected root, not under task_dir.
+        produced_in_task = list(task_dir.rglob(".dataline_cache"))
+        assert produced_in_task == [], (
+            f"Cache leaked into task_dir: {produced_in_task}"
+        )
+        produced_in_cache = list(cache_root.glob("*.json"))
+        assert len(produced_in_cache) == 1, (
+            f"Expected 1 cache file in repo cache, got {produced_in_cache}"
+        )
+
+
 # ── cache key stability ──────────────────────────────────────────
 
 def test_cache_key_stable(tmp_path):

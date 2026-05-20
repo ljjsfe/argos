@@ -164,9 +164,18 @@ def _cache_key(file_paths: list[Path], model_name: str) -> str:
     return h.hexdigest()[:32]
 
 
+# Repo-root-relative cache. CRITICAL: do NOT write inside task_dir — Profiler
+# would re-scan the cache file as an input on the next run, creating
+# self-injected info pollution (audit 2026-05-19, V90 lessons). The cache
+# key is content-derived so cross-task sharing happens naturally when two
+# tasks reuse identical doc bytes.
+_REPO_ROOT_CACHE = Path(__file__).resolve().parents[2] / ".dataline_cache" / "doc_glossary"
+
+
 def _cache_paths(task_dir: Path, key: str) -> list[Path]:
-    """Lookup order: task-local first, then global if env var set."""
-    candidates = [task_dir / ".dataline_cache" / f"doc_glossary_{key}.json"]
+    """Lookup order: repo-local cache, then global env-var cache if set.
+    Task_dir is intentionally NOT a cache location (would pollute next run)."""
+    candidates = [_REPO_ROOT_CACHE / f"{key}.json"]
     global_root = os.environ.get("DATALINE_GLOBAL_CACHE_DIR")
     if global_root:
         candidates.append(Path(global_root) / "doc_glossary" / f"{key}.json")
@@ -185,13 +194,13 @@ def _load_cache(task_dir: Path, key: str) -> DocGlossary | None:
 
 
 def _save_cache(task_dir: Path, key: str, glossary: DocGlossary) -> None:
-    """Atomic write to task-local cache. Best-effort; failures are silent."""
-    cache_dir = task_dir / ".dataline_cache"
+    """Atomic write to repo-local cache (NOT task_dir). Best-effort; silent on error."""
+    cache_dir = _REPO_ROOT_CACHE
     try:
         cache_dir.mkdir(parents=True, exist_ok=True)
     except OSError:
         return
-    target = cache_dir / f"doc_glossary_{key}.json"
+    target = cache_dir / f"{key}.json"
     try:
         tmp = tempfile.NamedTemporaryFile(
             mode="w", encoding="utf-8", delete=False, dir=str(cache_dir),

@@ -414,7 +414,29 @@ class Sandbox:
         scratch = tempfile.mkdtemp(prefix="scratch_", dir=self._temp_dir)
         task_path = Path(self._task_dir)
 
+        # Reuse the Profiler's hygiene filter so scratch never exposes agent
+        # outputs (result.json / prediction.csv / output/) or self-injected
+        # caches (.dataline_cache/). LLM-generated code can otherwise read
+        # these directly via relative path, bypassing the L3 blacklist that
+        # only acted on the manifest.
+        from ..profiler.manifest import (
+            RESERVED_DIR_BASENAMES,
+            _reserved_artifact_reason,
+        )
         for item in task_path.iterdir():
+            # Skip dot-prefixed entries (.dataline_cache, .git, etc.)
+            if item.name.startswith("."):
+                continue
+            # Directory-basename check: top-level reserved dirs (output/,
+            # workspace/, temp/) never reach _reserved_artifact_reason via
+            # parts[:-1] because they appear at the leaf of the iterdir
+            # path — handle them explicitly.
+            if item.is_dir() and item.name in RESERVED_DIR_BASENAMES:
+                continue
+            # File-level check: result.json / prediction.csv / etc.
+            rel = item.relative_to(task_path)
+            if _reserved_artifact_reason(rel) is not None:
+                continue
             link = Path(scratch) / item.name
             if not link.exists():
                 try:
