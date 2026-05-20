@@ -1,14 +1,33 @@
-# Phase 0 holdout — was 5 tasks, now 4 after task_257 contamination removed (2026-05-19)
+# Phase 0 holdout — v2 (2026-05-19)
+#
 # DO NOT READ TRACE. DO NOT WRITE REFERENCE CODE. DO NOT INSPECT INTERMEDIATE OUTPUT.
-# Used solely to detect overfitting at ship gates.
+# Used solely to detect overfitting and capability changes at ship gates.
 #
-# REMOVED 2026-05-19: task_257 — A3/A2 design phase referenced its heavy_trajectories
-# output in commit messages (3d22080, 7b4b903), violating holdout discipline.
-# Accepted N=4 holdout rather than substituting because picking a replacement now
-# would require inspecting candidates — also tainting them.
+# History:
+# v1 (2026-05-18): 5 stable-failure tasks — task_89/199/257/379/396
+#   - task_257 REMOVED (contaminated: heavy_trajectories cited in commits)
+#   - Reduced to N=4
+# v2 (2026-05-19): per V90 interpretation audit (docs/V90_INTERPRETATION_AUDIT.md)
+#   the old N=4 had 0/4 baseline pass rate → ZERO discriminative power
+#   (couldn't tell ship effects from variance). Replaced with 4 tasks
+#   showing real cross-run variance (fail_rate 0.29-0.51 across 101 runs),
+#   stratified across difficulty.
 #
-# Remaining stratified split: 1 easy + 1 medium + 2 hard.
-task_89
-task_199
-task_379
-task_396
+# Selection rule (deterministic, derived from cross-run mining, NOT eval-tuned):
+#   - fail_rate ∈ [0.20, 0.80] across ≥5 historical runs (real variance)
+#   - NOT in train_8.txt
+#   - NOT previously inspected during this work (no trace audit / no reference
+#     code / no individual prediction read)
+#   - Stratified 2 medium + 2 hard (no easy/extreme available in variance band)
+#
+# Discriminative power: each task PASSES baseline some-of-the-time and FAILS
+# other times. A ship that genuinely breaks capability will drop these from 1→0;
+# a ship that genuinely lifts capability could move 0→1 cases too.
+#
+# v86 baseline on these 4: all 1.0 (clean-input pass) — so the active gate is
+# "ship must not regress these from 1 to 0".
+#
+task_249    # medium, fail_rate 29% — moderate variance
+task_250    # medium, fail_rate 51% — balanced variance (max discrimination)
+task_355    # hard,   fail_rate 43% — balanced variance
+task_420    # hard,   fail_rate 32% — moderate variance
