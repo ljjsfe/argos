@@ -190,7 +190,49 @@ def run_task(
                 "total_size_bytes": sum(e.size_bytes for e in manifest.entries),
             }
 
-            # Stage 2: Domain rules (deterministic + optional LLM compile)
+        # ─── Stage 1b (Block 4): doc → structured table extraction ───
+        # Runs in BOTH paths (cached path + fresh path). Cache makes the
+        # repeat call cheap; ensures heavy-mode trajectories also see the
+        # extracted virtual tables. Failure → silent fallback.
+        #
+        # OPT-IN: set DATALINE_ENABLE_NARRATIVE=1 to activate. Default off
+        # because the 2026-05-20 smoke test on task_418 showed Qwen
+        # 3B-active returns `entity_type: null` (escape hatch) rather than
+        # committing to extraction. Architecture preserved for future use
+        # (stronger model, refined prompt, or different domain corpus).
+        # See docs/BLOCK4_NARRATIVE_EXTRACTION_DESIGN.md Section 11.
+        extracted_schemas = []
+        if os.environ.get("DATALINE_ENABLE_NARRATIVE"):
+            with tracer.span("doc_extractor"):
+                from ..profiler import doc_extractor
+                try:
+                    extracted_schemas = doc_extractor.extract_docs(
+                        manifest, traced_llm,
+                    )
+                except Exception as e:
+                    _log(trace, "doc_extractor", f"failed (non-fatal): {e}")
+                    extracted_schemas = []
+                if extracted_schemas:
+                    _log(trace, "doc_extractor",
+                         f"extracted {len(extracted_schemas)} virtual tables")
+                    sandbox.extra_csv_links = [
+                        (s.table_name, s.csv_path) for s in extracted_schemas
+                    ]
+                    summary_lines = doc_extractor.schemas_to_summary_lines(
+                        extracted_schemas,
+                    )
+                    manifest_json = (
+                        manifest_json
+                        + "\n\n## Virtual tables (extracted from narrative docs)\n"
+                        + "\n".join(summary_lines)
+                    )
+        obs["profiler"]["narrative_extracted"] = [
+            {"table": s.table_name, "rows": s.row_count, "cols": list(s.columns)}
+            for s in extracted_schemas
+        ]
+        # Stage 2: Domain rules — ONLY when not using cached precomputed
+        # context (heavy mode reuses domain_rules already computed).
+        if precomputed_context is None:
             with tracer.span("domain_rules"):
                 _log(trace, "domain_rules", "Extracting domain rules from docs")
                 domain_rules_raw = analyzer._extract_domain_rules(manifest)

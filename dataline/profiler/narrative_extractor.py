@@ -35,7 +35,9 @@ logger = logging.getLogger(__name__)
 
 # Cache schema version — bump if the extraction-prompt or output JSON
 # shape changes incompatibly, so stale caches are invalidated.
-_SCHEMA_VERSION = "narrative-v1"
+# v2 (2026-05-20): stronger prompt to push past Qwen's "output null"
+# escape hatch + reject scaffolding-word entity matches in detect.
+_SCHEMA_VERSION = "narrative-v2"
 
 
 # Repo-relative cache for extracted CSVs and metadata. Mirrors the B2
@@ -62,6 +64,16 @@ _REPEATING_ENTITY_RE = re.compile(
     # "Patient 43003" / "molecule 5" / "transaction #12" — repeated entity tokens
     r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(?:No\.?\s*)?#?(\d{1,6})\b",
 )
+
+# Entity-words that almost always indicate document scaffolding rather than
+# actual instance records: "Use Case 1", "Example 2", "Step 3" headers.
+# We reject these from the repeating-entity count so glossary docs (which
+# legitimately have "Use Case N" sections) aren't misclassified as narrative.
+_SCAFFOLDING_WORDS = frozenset({
+    "use case", "example", "step", "section", "chapter", "appendix",
+    "figure", "table", "rule", "definition", "exercise", "exhibit",
+    "case study",
+})
 
 
 def detect_narrative_shape(md_text: str) -> tuple[bool, str]:
@@ -93,14 +105,18 @@ def detect_narrative_shape(md_text: str) -> tuple[bool, str]:
         return False, f"table-heavy ({n_table_rows}/{n_lines} table-rows)"
 
     # Repeating-entity count: group by entity word, count distinct numeric IDs.
+    # Reject scaffolding words ("Use Case N", "Example N", "Step N") — these
+    # are document section markers, not entity instances.
     by_entity: dict[str, set[str]] = {}
     for m in _REPEATING_ENTITY_RE.finditer(md_text):
         ent = m.group(1).lower().strip()
+        if ent in _SCAFFOLDING_WORDS:
+            continue
         nid = m.group(2)
         by_entity.setdefault(ent, set()).add(nid)
     repeating = [e for e, ids in by_entity.items() if len(ids) >= 2]
     if not repeating:
-        return False, "no repeating entity"
+        return False, "no repeating entity (after scaffolding filter)"
 
     return True, f"narrative (entity={repeating[0]}, n_instances≥{len(by_entity[repeating[0]])})"
 
@@ -198,39 +214,53 @@ def _save_cache(key: str, schema: ExtractedSchema) -> None:
 
 # ── Extraction (LLM-backed) ──────────────────────────────────────────
 
-_EXTRACTION_PROMPT_VERSION = "v1"
+_EXTRACTION_PROMPT_VERSION = "v2"
 
-_EXTRACTION_PROMPT = """You are extracting structured records from a narrative document.
+_EXTRACTION_SYSTEM = (
+    "You are a precise information-extraction agent. Your job is to read "
+    "a document that describes multiple instances of some entity (e.g., "
+    "patients, molecules, transactions, products) and emit one JSON record "
+    "per instance. The document has been pre-classified as containing "
+    "repeating entity records — your job is to find them, not to second-"
+    "guess whether they exist. Output ONLY valid JSON."
+)
 
-The document describes multiple instances of a single entity type
-(e.g., patients, products, transactions, molecules). Your task:
+_EXTRACTION_USER_TEMPLATE = """The document below has been pre-classified as containing repeating
+instance records (a regex found ≥2 numbered entities). Your task is to
+extract those records as structured rows.
 
-1. Identify the entity type (one word, e.g., "patient", "molecule").
-2. List the fields documented for each instance. Include ONLY fields that
-   appear with concrete values across multiple instances. Use lowercase
-   snake_case for column names (e.g., "patient_id", "creatinine_mg_dl").
-3. For each instance, emit one JSON object with the fields you identified.
-   Use null for missing values. Numeric fields should be numbers (not
-   strings). Dates as YYYY-MM-DD strings.
+Procedure:
+1. Scan the document and identify the entity-type word that appears
+   most frequently with a numeric ID (e.g., "Patient 43003", "Patient 133382").
+   Use that as `entity_type` (lowercase, singular).
+2. List the fields documented across instances. Choose lowercase snake_case
+   column names. Include any field that has a concrete value in ≥2 instances.
+   Common patterns: identifier, demographics, dates, measurements, units.
+3. Emit one JSON object per instance you found. Use null for missing fields.
+   Numbers as numbers (NOT strings). Dates as YYYY-MM-DD when possible.
 
-Output ONLY valid JSON with this exact shape:
-{
-  "entity_type": "patient",
-  "schema": [{"name": "patient_id", "type": "integer"}, ...],
-  "records": [{"patient_id": 43003, "sex": "male", ...}, ...]
-}
+Required output (ONLY this JSON, nothing else):
+{{
+  "entity_type": "<word>",
+  "schema": [{{"name": "<col>", "type": "<integer|real|text|date>"}}, ...],
+  "records": [{{"<col>": <value>, ...}}, ...]
+}}
 
-If the document does NOT contain repeating structured records (e.g., it's
-a glossary, a single article, or pure prose), output: {"entity_type": null,
-"schema": [], "records": []} — do not invent records.
+Constraints:
+- Emit AT LEAST 2 records. If you literally cannot find 2 distinct
+  numbered instances, only THEN output entity_type=null, schema=[],
+  records=[]. The default expectation is that records exist.
+- Do NOT invent records that aren't in the document.
+- If the document is truncated mid-instance, extract what you can.
 
 Document:
 ---
+{doc}
 """
 
 
-def _build_prompt(md_text: str, max_chars: int = 30_000) -> str:
-    """Return prompt with doc truncated if very large.
+def _build_user_prompt(md_text: str, max_chars: int = 30_000) -> str:
+    """Return user-prompt with doc truncated if very large.
 
     Truncation is conservative — 30K char limit lets us handle docs up
     to ~7K tokens of content while leaving room for the model's response.
@@ -238,13 +268,32 @@ def _build_prompt(md_text: str, max_chars: int = 30_000) -> str:
     have the full picture.
     """
     if len(md_text) <= max_chars:
-        return _EXTRACTION_PROMPT + md_text
-    head = md_text[: max_chars - 200]
-    tail_marker = (
-        f"\n\n[... truncated; document continues for "
-        f"{len(md_text) - len(head)} more characters ...]\n"
-    )
-    return _EXTRACTION_PROMPT + head + tail_marker
+        body = md_text
+    else:
+        head = md_text[: max_chars - 200]
+        tail_marker = (
+            f"\n\n[... truncated; document continues for "
+            f"{len(md_text) - len(head)} more characters ...]\n"
+        )
+        body = head + tail_marker
+    return _EXTRACTION_USER_TEMPLATE.format(doc=body)
+
+
+def _call_llm(llm_client: Any, md_text: str) -> str | None:
+    """Adapter: supports both `.chat(system, user)` (real LLMClient) and
+    `.complete(prompt)` (legacy/test mock). Returns raw text or None.
+    """
+    user = _build_user_prompt(md_text)
+    if hasattr(llm_client, "chat"):
+        try:
+            return llm_client.chat(_EXTRACTION_SYSTEM, user)
+        except Exception:
+            raise
+    elif hasattr(llm_client, "complete"):
+        # Mock interface — concatenate system+user as single prompt.
+        return llm_client.complete(_EXTRACTION_SYSTEM + "\n\n" + user)
+    else:
+        raise TypeError(f"llm_client lacks .chat() and .complete(): {type(llm_client)}")
 
 
 def _parse_llm_output(raw: str) -> dict[str, Any] | None:
@@ -317,11 +366,12 @@ def extract_records(
         logger.debug("narrative_extractor: no LLM client; skip")
         return None
 
-    prompt = _build_prompt(md_text)
     try:
-        raw = llm_client.complete(prompt)
+        raw = _call_llm(llm_client, md_text)
     except Exception as e:
         logger.warning("narrative_extractor: LLM error on %s: %s", source_path, e)
+        return None
+    if raw is None:
         return None
 
     parsed = _parse_llm_output(raw)

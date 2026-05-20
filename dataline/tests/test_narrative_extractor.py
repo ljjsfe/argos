@@ -142,16 +142,16 @@ class TestParseLlmOutput:
 # ── extract_records (end-to-end with mock LLM) ───────────────────────
 
 class _FakeLLM:
-    """Mock client with .complete(prompt) -> str."""
+    """Mock client with .chat(system, user) -> str (real LLMClient shape)."""
 
     def __init__(self, response: str):
         self.response = response
         self.calls = 0
         self.last_prompt = ""
 
-    def complete(self, prompt: str) -> str:
+    def chat(self, system: str, user: str) -> str:
         self.calls += 1
-        self.last_prompt = prompt
+        self.last_prompt = user  # what we care about checking
         return self.response
 
 
@@ -226,7 +226,7 @@ class TestExtractRecords:
 
     def test_llm_exception_returns_none(self):
         class _BrokenLLM:
-            def complete(self, prompt):
+            def chat(self, system, user):
                 raise RuntimeError("network down")
         schema = extract_records("/path/Patient.md", self.NARRATIVE * 3, _BrokenLLM())
         assert schema is None

@@ -287,3 +287,75 @@ Two options:
 **B**: Skip implementation; run a clean **v97 full eval on current ship** (`ef02ebd`) to lock in the current baseline measurement before any new work. Then decide whether to invest the 6h.
 
 User signaled "需要完整的测试 才知道where we are" → option B is the right immediate next step. The design above documents what we'd do IF v97 confirms there's still ROI to chase.
+
+---
+
+## 13. Smoke-test results & SHIP DECISION (2026-05-20)
+
+After v97 confirmed ship floor stable (0.69 mean), user authorized Block 4
+investment. Implementation followed steps 1-3 per Section 8.
+
+### Smoke test 1: prompt v1, task_418
+
+**Wiring**: ✅ doc_extractor span ran (267s, $0.024, 1 LLM call captured).
+**Extraction**: ❌ Qwen returned `{"entity_type": null, "schema": [], "records": []}`
+on the first doc — took the escape hatch in the prompt rather than commit.
+
+Root cause: prompt v1 said "If doc doesn't contain records, output null"
+and Qwen 3B-active over-applied this for any uncertainty.
+
+Knowledge.md false-positive: detect_narrative_shape matched "Use Case 1",
+"Use Case 2" headers as repeating entity → wasted call on a glossary doc.
+
+### Mitigations applied (prompt v2)
+
+- Added `_SCAFFOLDING_WORDS` filter in detect_narrative_shape — rejects
+  "Use Case N" / "Example N" / "Step N" patterns. Confirmed: knowledge.md
+  now correctly rejected; Patient.md / Laboratory.md still pass.
+- Strengthened extraction prompt:
+  - Removed easy null escape ("If not narrative, output null")
+  - Pre-classified guarantee in prompt: "doc has been pre-classified as
+    containing records — your job is to find them, not second-guess"
+  - "Emit AT LEAST 2 records" constraint
+  - Cache schema bumped `narrative-v1` → `narrative-v2` to invalidate
+    stale caches.
+
+### Smoke test 2: prompt v2, task_418
+
+**Wiring**: ✅ span ran 241s.
+**Extraction**: ❌ INCONCLUSIVE — llm_input / llm_output captured empty
+in trace_agent.json, cost_usd=None, narrative_extracted=[]. The full
+task completed (prediction=0 vs gold=1) but no extraction CSV was written.
+
+### Decision: SHIP AS OPT-IN, not default-on
+
+Reasons:
+- v1 evidence: Qwen explicitly returns null on the actual narrative docs.
+- v2 evidence: no clear extraction success either.
+- Without solid evidence that extraction works on KDD docs, default-on
+  risks spending $0.05-$0.10 per task on a no-op LLM call, with the
+  worst case of extraction-quality variance amplifying LLM noise.
+
+**Implementation**:
+- Integration code (orchestrator + Sandbox extra_csv_links) is shipped
+  but **gated on `DATALINE_ENABLE_NARRATIVE=1` env var, default OFF**.
+- Module `narrative_extractor.py` + dispatcher `doc_extractor.py` +
+  25 unit tests are in `main` branch.
+- Flip on later by setting the env var — no further code change needed.
+
+### When to revisit
+
+- **Stronger model becomes available** (Qwen 4.X / GPT-5 / claude-opus-5)
+  that doesn't take prompt escape hatches.
+- **Different domain corpus** where narratives are simpler / shorter.
+- **Multi-call orchestration**: chunk doc → extract each chunk → merge.
+  Costs 5× but each chunk is easier for the small model.
+- **Few-shot prompt** with 2-3 example doc → records pairs in the prompt.
+
+### Cost so far
+
+- Step 1-3 implementation: ~6h dev time.
+- Smoke tests: ~$2 (mostly Planner iters on task_418, not extraction).
+- Saved: did NOT spend on paired test ($16) or full v98 eval ($22).
+- Net: design + working architecture preserved at low cost; production
+  unchanged.

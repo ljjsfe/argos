@@ -229,6 +229,11 @@ class Sandbox:
         self._temp_dir = tempfile.mkdtemp(prefix="dataline_")
         self._step_count = 0
         self._stateful_repl = stateful_repl
+        # Extra CSV paths to symlink into scratch dir on each execute().
+        # Set by orchestrator after Profiler doc-extraction step (Block 4).
+        # Each tuple is (link_basename, absolute_csv_path) so the link can
+        # use a friendly DuckDB view name regardless of the cache filename.
+        self.extra_csv_links: list[tuple[str, str]] = []
         self._install_helpers()
 
     @property
@@ -453,6 +458,23 @@ class Sandbox:
                     os.symlink(str(helpers), str(link))
                 except OSError:
                     pass
+
+        # Block 4: symlink extra CSVs produced by Profiler doc-extraction.
+        # Friendly basename (e.g. "narrative_patient.csv") makes DuckDB
+        # auto-register the view by that name, exposing it to Planner SQL.
+        for link_basename, csv_path in self.extra_csv_links:
+            link = Path(scratch) / f"{link_basename}.csv"
+            if link.exists():
+                continue
+            if not Path(csv_path).is_file():
+                logger.debug(
+                    "extra_csv missing: %s (link %s)", csv_path, link_basename,
+                )
+                continue
+            try:
+                os.symlink(csv_path, str(link))
+            except OSError as e:
+                logger.debug("could not symlink extracted CSV %s: %s", csv_path, e)
 
         # Symlink step_result.json location so save_result() writes to TEMP_DIR
         # (data_helpers reads TEMP_DIR env var, so this is not needed here)
