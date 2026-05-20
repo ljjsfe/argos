@@ -76,8 +76,8 @@ class ReplayResult:
     error: str = ""
 
 
-def load_cases(split: str | None) -> list[dict]:
-    cases_path = REPLAY_DIR / "cases.jsonl"
+def load_cases(split: str | None, cases_file: str | None = None) -> list[dict]:
+    cases_path = REPLAY_DIR / (cases_file or "cases.jsonl")
     if not cases_path.exists():
         sys.exit(f"Missing {cases_path}. Run build_replay_set.py first.")
     cases = [json.loads(line) for line in cases_path.read_text().splitlines() if line.strip()]
@@ -304,13 +304,16 @@ def main():
                     help="Path to alternate judge.md prompt to test")
     ap.add_argument("--label", default="baseline",
                     help="Label for output report file")
+    ap.add_argument("--cases-file", default=None,
+                    help="Alternate cases jsonl in replay_set/ (default: cases.jsonl)")
     args = ap.parse_args()
 
     cfg = yaml.safe_load((REPO_ROOT / "config.yaml").read_text())
     llm = create_client_from_config(cfg)
     model = os.environ.get("MODEL_NAME", cfg["llm"].get("model", "?"))
-    cases = load_cases(args.split)
-    print(f"Model: {model}  |  cases: {len(cases)}  |  split: {args.split or 'all'}")
+    cases = load_cases(args.split, args.cases_file)
+    print(f"Model: {model}  |  cases: {len(cases)}  |  split: {args.split or 'all'}  "
+          f"|  file: {args.cases_file or 'cases.jsonl'}")
     if args.prompt_override:
         print(f"Prompt override: {args.prompt_override}")
 

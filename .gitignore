@@ -23,6 +23,7 @@ venv/
 # Logs & temp
 logs/
 *.log
+tmp/
 
 # Monitoring scripts (one-off)
 monitor.py
