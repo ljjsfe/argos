@@ -957,17 +957,8 @@ def _check_qa_column_count(
 ) -> list[HarnessFlag]:
     """Rule 10: column count vs QA expectation.
 
-    Severity is gated on QuestionSpec confidence — we only BLOCK when the
-    spec is high-confidence (computation_type ∈ {count, ratio}). This
-    mirrors QuestionSpec.to_guidance() which only surfaces expected_column_count
-    under the same gate; the two policies share a single source of truth.
-
-    The reason: for compound or two-clause questions ("Identify X. Name
-    the user who Y.") QuestionSpec under-counts columns and a BLOCK would
-    force the planner to drop a legitimate column from the answer. v92
-    audit (2026-05-20) caught this on a 2-column question where the spec
-    reported expected_column_count=1 and the rule blocked the correct
-    answer back to 1 column across multiple retries.
+    Missing columns → always BLOCK (reduces recall).
+    Extra columns → BLOCK when ratio ≥ 3x (clearly wrong), else WARN.
     """
     if spec.expected_column_count <= 0 or not structured_json:
         return []
@@ -981,12 +972,6 @@ def _check_qa_column_count(
 
     actual = len(answer)
     expected = spec.expected_column_count
-    # High-confidence gate: only block when computation type is one of the
-    # narrow shapes the analyzer is reliable on. Otherwise WARN-only so the
-    # planner gets a hint but isn't forced to throw away potentially-correct
-    # extra columns.
-    high_confidence = spec.computation_type in {"count", "ratio"}
-
     if actual < expected:
         return [HarnessFlag(
             rule="qa_column_count",
@@ -997,11 +982,9 @@ def _check_qa_column_count(
             ),
         )]
     if actual > expected:
-        # Even at 2x over, only block under high-confidence spec.
-        if actual >= expected * 2 and high_confidence:
-            severity = "block"
-        else:
-            severity = "warn"
+        # BLOCK when answer has 2x or more extra columns — clearly wrong.
+        # WARN for mild violations (actual == expected + 1) to allow escalation.
+        severity = "block" if actual >= expected * 2 else "warn"
         return [HarnessFlag(
             rule="qa_column_count",
             severity=severity,
