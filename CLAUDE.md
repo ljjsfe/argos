@@ -233,20 +233,43 @@ Two scoring axes: **mean** (sum of per-task scores incl. partial credit ÷ 50) a
 
 | Run | Mode | Mean | Perfect | Cost | SHA | Notes |
 |-----|------|------|---------|------|-----|-------|
-| **v93b** | Heavy auto | **0.677** | **33/50** | $22.40 | `26bc301` | P1+P2 verification — confirms v93 isn't lucky |
-| **v93** | Heavy auto | **0.703** | **34/50** | $21.72 | `26bc301` | First P1+P2 run — filter_no_effect + internal_id BLOCK |
-| **v92** | Heavy auto | 0.648 | 32/50 | $27.26 | `a5e7d48` | Clean-input baseline post-hygiene fixes |
+| **v96** | Heavy auto | **0.660** | **32/50** | $22.00 | `ed9d81d` | + C1/C2/C3 — rules 0 fire on KDD (universal hygiene); -2 task = LLM variance |
+| **v95** | Heavy auto | **0.700** | **34/50** | $21.94 | `40dcb4e` | Revert Phase B — P1+P2+Phase A current ship |
+| v94 | Heavy auto | 0.640 | 32/50 | $28.79 | `55a8208`†| +Phase B qa_col gate — reverted (LLM variance amplification) |
+| v93b | Heavy auto | 0.677 | 33/50 | $22.40 | `26bc301` | P1+P2 verification |
+| v93 | Heavy auto | 0.703 | 34/50 | $21.72 | `26bc301` | First P1+P2 run |
+| v92 | Heavy auto | 0.648 | 32/50 | $27.26 | `a5e7d48` | Clean-input baseline post-hygiene |
 | v91 | Heavy auto | 0.660 | ~33/50 | — | pre `a5e7d48` | Polluted inputs (cache self-injection) |
 | v90 | Heavy auto | 0.707 | ~35/50 | — | pre `a5e7d48` | Polluted inputs + lucky variance |
 | v80 | Baseline (no heavy) | — | 33/50 | — | — | Pre-heavy reference |
 | v77 | Baseline (no heavy) | — | 33-34/50 | — | — | Stable peak before v78 regression |
 | Heavy v70b | Heavy auto | — | ~35/50 | — | — | Reference peak with stateful REPL (reverted) |
 
-**Current ship baseline (post-P1+P2, content-clean inputs)**: mean ≈ **0.69** (avg of v93+v93b), perfect = **33-34**.
+† SHA reverted in `40dcb4e`.
+
+**Current ship baseline (post-P1+P2+Phase A+C1/C2/C3)**: mean ≈ **0.69** (4-run avg of v93+v93b+v95+v96 = 0.685), perfect = **32-34** (mean 33.25).
 
 **Eval noise floor: ±4-5 tasks at temp=0** (≈ ±0.08-0.10 mean). Any change targeting <5 tasks needs ≥2 verification runs.
 
-**Cluster-A semantic-error tasks** (8/15 partials in v92) remain the dominant failure mode — code runs successfully, returns plausibly-shaped scalar/list, but the SELECT/WHERE/aggregation chose the wrong filter or aggregation. P1 catches the scalar-zero shape but Planner often can't recover within budget. Next levers: better Planner-Harness coupling, deeper QuestionSpec, or domain-rule extraction.
+#### Language × Difficulty matrix (v95)
+
+74% of v95 tasks final-step code is pure SQL (37/50); 26% is mixed Python+SQL wrapper (13/50). Pure-SQL tasks pass at 78% (29/37); mixed tasks pass at 38% (5/13) — **mixed is the dominant failure mode for hard tasks** (9/11 hard tasks land in the mixed category).
+
+| Language | easy (15) | medium (23) | hard (11) | extreme (1) | overall |
+|---|---|---|---|---|---|
+| pure SQL | 12/15 (80%) | 16/20 (80%) | 1/2 (50%) | — | 29/37 (78%), mean 0.811 |
+| mixed Py+SQL | — | 1/3 (33%) | 4/9 (44%) | 0/1 (0%) | 5/13 (38%), mean 0.385 |
+
+**Cluster-A semantic-error tasks** (8/15 partials in v92, similar in v95) remain the dominant failure mode — code runs successfully, returns plausibly-shaped scalar/list, but the SELECT/WHERE/aggregation chose the wrong filter or aggregation. Most are in the mixed Python+SQL category. P1 catches the scalar-zero shape but Planner often can't recover within budget.
+
+### Rule-design discipline (from 2026-05-20 audit + AHE-borrowed practices)
+
+These principles govern any new HarnessGate rule, prompt change, or harness component:
+
+1. **Universal-principle provenance** — Rules must be derivable from SQL/RDBMS/database textbook principles, WITHOUT inspecting any eval traces. Looking at failure traces to identify *which capability gap exists* is fine; looking at them to *calibrate parameter values* is overfitting. Examples: "WHERE = won't match NULL" is universal; "rowcount > 50 is suspicious for X-style questions" is calibrated-from-KDD.
+2. **Predict-then-verify in commit** — Each ship commit must include explicit numerical predictions (expected hits / expected lift / FP risk). Next eval falsifies or confirms them. Self-deception is harder when the receipt is in git.
+3. **Additive over subtractive** — Adding new WARN/BLOCK rules is low risk. Removing or softening existing BLOCKs amplifies LLM variance (v94 lesson: changing one BLOCK→WARN gate dropped score 6pp on a single run via iteration-path shifts). Subtractive changes require paired-test on existing traces.
+4. **Dual-language detection where applicable** — Rules about set/aggregate/null semantics should detect both SQL forms (`COUNT(DISTINCT)`, `IS NULL`) and pandas forms (`.nunique()`, `.dropna()`). Don't ship SQL-only rules without checking the pandas equivalent.
 
 ### Reverted Experiments — Do Not Re-Attempt (without new approach)
 
