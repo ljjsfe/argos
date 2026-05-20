@@ -31,6 +31,7 @@ from ..core.sandbox import Sandbox
 from ..core.state import (
     add_step,
     create_initial_state,
+    set_doc_glossary_hints,
     set_domain_bindings,
     set_focus_hints,
     set_playbook_hints,
@@ -278,6 +279,24 @@ def run_task(
                 obs["domain_bindings_lines"] = _db.count("\n") + 1
         except Exception as e:
             _log(trace, "domain_bindings", f"skipped: {e}")
+
+        # ─── Stage 3c''': B2 doc glossary (LLM-extracted, format-agnostic) ───
+        # Universal replacement for A2's markdown-bold-prefix parser. ONE LLM
+        # call per task (cached) → structured glossary → deterministic match
+        # → DOC_GLOSSARY_HINTS in PlannerCoder context. Coexists with A2;
+        # A2 will retire after eval evidence shows B2 dominates.
+        try:
+            from .doc_glossary import extract_doc_glossary, build_doc_glossary_hints
+            _glossary = extract_doc_glossary(task_dir, manifest, llm)
+            _dg_hints = build_doc_glossary_hints(question, _glossary)
+            if _dg_hints:
+                state = set_doc_glossary_hints(state, _dg_hints)
+                _log(trace, "doc_glossary",
+                     f"{len(_glossary.terms)} terms; {_dg_hints.count(chr(10))+1} hints")
+                obs["doc_glossary_terms"] = len(_glossary.terms)
+                obs["doc_glossary_hint_lines"] = _dg_hints.count("\n") + 1
+        except Exception as e:
+            _log(trace, "doc_glossary", f"skipped: {e}")
 
         # ─── Stage 3d: Playbook retrieval (curated patterns, zero LLM) ───
         # Fail-soft: missing/empty playbook → no hints, no behavior change.

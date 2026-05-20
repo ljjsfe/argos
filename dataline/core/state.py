@@ -69,6 +69,11 @@ def set_domain_bindings(state: AnalysisState, bindings: str) -> AnalysisState:
     return replace(state, domain_bindings=bindings)
 
 
+def set_doc_glossary_hints(state: AnalysisState, hints: str) -> AnalysisState:
+    """Return new state with B2 doc_glossary_hints set."""
+    return replace(state, doc_glossary_hints=hints)
+
+
 def compress_manifest(manifest: Manifest) -> str:
     """Compress manifest to rich schema context.
 

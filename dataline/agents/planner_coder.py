@@ -291,6 +291,26 @@ def _build_context_managed_prompt(
             heading="",
         ))
 
+    # B2 doc glossary hints — LLM-extracted, format-agnostic. Sits above
+    # data-value focus_hints because semantic anchors should be considered
+    # before column-value matches. Compressible: ContextManager may trim
+    # under budget pressure (this is the only section that can grow with
+    # rich docs).
+    if state.doc_glossary_hints:
+        sections.append(Section(
+            name="doc_glossary_hints",
+            content=(
+                f"## Doc Glossary (question phrases mapped to documented terms)\n"
+                f"{state.doc_glossary_hints}\n\n"
+                f"Each hint shows the term's definition, enumerated values, "
+                f"and source section from the docs. Trust these bindings "
+                f"over guessing column meanings."
+            ),
+            priority=92,
+            compressible=True,
+            heading="",
+        ))
+
     # Data manifest (rich schema with DISTINCT values, sample rows)
     sections.append(Section(
         name="manifest",

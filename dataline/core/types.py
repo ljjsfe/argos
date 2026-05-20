@@ -197,6 +197,7 @@ class AnalysisState:
     playbook_entry_ids: tuple[str, ...] = ()         # ids of retrieved entries — for telemetry tracking
     focus_hints: str = ""                            # deterministic question-entity → manifest column/value bindings (A1/H1)
     domain_bindings: str = ""                        # deterministic question-entity → knowledge.md term bindings (A2)
+    doc_glossary_hints: str = ""                     # LLM-extracted glossary, question-matched bindings (B2)
     completed_steps: tuple[str, ...] = ()           # 1-line per step
     full_step_details: tuple[StepRecord, ...] = ()  # raw data for Finalizer + Judge
 
