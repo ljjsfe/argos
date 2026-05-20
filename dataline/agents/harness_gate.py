@@ -338,8 +338,9 @@ _DEBUG_COLUMN_PATTERNS = [
 
 # Columns that almost always indicate internal join keys / debug data left in
 # the answer (universal — these are universally "internal identifier" naming
-# conventions, not benchmark-specific). v92 audit: task_330 returned
-# `home_team_api_id, away_team_api_id` next to the real answer.
+# conventions, not benchmark-specific). Pattern shape: FK-style suffix columns
+# (*_api_id / *_pk / *_internal_id / row_id) leaking into the SELECT output
+# alongside the legitimate answer.
 _INTERNAL_ID_COLUMN_PATTERNS = [
     r"^.*_api_id$",
     r"^.*_internal_id$",
@@ -462,12 +463,14 @@ def _check_empty_answer(
 # Rule 8c: Filter-no-effect — scalar zero on a filter-and-aggregate question
 # ---------------------------------------------------------------------------
 #
-# Catches the very common Cluster-A failure shape: code runs, returns a scalar
-# 0 (count, ratio, percentage, sum), but the question implies a non-zero
-# result. Root causes: WHERE filter collapsed to empty (wrong literal /
-# threshold), JOIN missed (wrong key), or aggregation produced zero where it
-# shouldn't. v92 audit found 3+ tasks of this shape (352 ratio=0, 396 pct=0,
-# 418 count=0) — none caught by existing rules.
+# Catches the common "filter collapsed to empty set" failure shape: code runs,
+# returns a scalar 0 (count, ratio, percentage, sum), but the question implies
+# a non-zero result. Root causes: WHERE filter matched no rows (wrong literal
+# spelling/case, wrong threshold), JOIN missed (wrong key), or aggregation
+# produced zero where it shouldn't. This shape is universal across financial,
+# clinical, and analytics domains — anywhere "how many X with Y" or "what
+# percentage of X" is asked, a 0 answer is rarely a confident final answer
+# unless the upstream filter was correct.
 #
 # Universal — applies regardless of benchmark. The rule is **WARN by default
 # (legit zero is possible), BLOCK only when combined with a `sql_where_value`
@@ -476,11 +479,14 @@ def _check_empty_answer(
 _FILTER_AGG_TRIGGERS = (
     # Counting with filter
     r"\bhow\s+many\b", r"\bnumber\s+of\b", r"\bcount\s+of\b", r"\btotal\s+number\b",
-    # Ratio / proportion
+    # Ratio / proportion / share
     r"\bratio\b", r"\bproportion\b", r"\bhow\s+much\s+more\b",
     r"\bhow\s+many\s+times\b", r"\bwhat.*times\b",
-    # Percentage
-    r"\bpercentage\b", r"\bpercent\b", r"\bwhat.*%\b",
+    r"\bshare\b", r"\bfraction\b",
+    # Percentage / rate
+    r"\bpercentage\b", r"\bpercent\b", r"\bwhat.*%\b", r"\brate\b",
+    # Epidemiology / clinical (domain-universal NL constructs)
+    r"\bincidence\b", r"\bprevalence\b",
     # Sum / total
     r"\btotal\b.*\bof\b",
 )

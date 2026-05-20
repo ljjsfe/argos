@@ -227,16 +227,26 @@ Dockerfile         # Submission image (≤10 GB, no network at runtime)
 
 Scoring: `Score = Recall − λ × (Extra Columns / Predicted Columns)`. Extra columns ARE penalized. Column names ignored; values matched by content (sorted), case-sensitive, ROUND_HALF_UP 2dp.
 
-### Current Baselines (last updated 2026-05-16)
+### Current Baselines (last updated 2026-05-20)
 
-| Mode | Eval | Score | Top failure | Notes |
-|------|------|-------|-------------|-------|
-| Baseline | `eval_v80_fallback_20260516_0039` | **66%** | partial_result (9), code_error (8) | Latest stable. Judge bottleneck=4 |
-| Baseline | `eval_v77_revert_20260515_1621` | **67%** | partial_result (12), code_error (4) | Stable peak after v78 regression |
-| Heavy | `eval_v70b_heavy_parallel_20260514_2339` | **71%** | partial_result (11), code_error (4) | Heavy + parallel trajectories |
-| Heavy | `eval_v45_repl_threadlocal_20260430` | **71%** | partial_result (11), code_error (4) | Peak with stateful REPL (since reverted) |
+Two scoring axes: **mean** (sum of per-task scores incl. partial credit ÷ 50) and **perfect** (count of score==1.0). Mean is the headline number; perfect is the strict pass-rate.
 
-**Eval noise floor: ±4-5 tasks at temp=0** (confirmed v5f/v5g experiment). Any change targeting <5 tasks cannot be reliably measured on the 50-task eval. Either target ≥5 tasks or repeat runs.
+| Run | Mode | Mean | Perfect | Cost | SHA | Notes |
+|-----|------|------|---------|------|-----|-------|
+| **v93b** | Heavy auto | **0.677** | **33/50** | $22.40 | `26bc301` | P1+P2 verification — confirms v93 isn't lucky |
+| **v93** | Heavy auto | **0.703** | **34/50** | $21.72 | `26bc301` | First P1+P2 run — filter_no_effect + internal_id BLOCK |
+| **v92** | Heavy auto | 0.648 | 32/50 | $27.26 | `a5e7d48` | Clean-input baseline post-hygiene fixes |
+| v91 | Heavy auto | 0.660 | ~33/50 | — | pre `a5e7d48` | Polluted inputs (cache self-injection) |
+| v90 | Heavy auto | 0.707 | ~35/50 | — | pre `a5e7d48` | Polluted inputs + lucky variance |
+| v80 | Baseline (no heavy) | — | 33/50 | — | — | Pre-heavy reference |
+| v77 | Baseline (no heavy) | — | 33-34/50 | — | — | Stable peak before v78 regression |
+| Heavy v70b | Heavy auto | — | ~35/50 | — | — | Reference peak with stateful REPL (reverted) |
+
+**Current ship baseline (post-P1+P2, content-clean inputs)**: mean ≈ **0.69** (avg of v93+v93b), perfect = **33-34**.
+
+**Eval noise floor: ±4-5 tasks at temp=0** (≈ ±0.08-0.10 mean). Any change targeting <5 tasks needs ≥2 verification runs.
+
+**Cluster-A semantic-error tasks** (8/15 partials in v92) remain the dominant failure mode — code runs successfully, returns plausibly-shaped scalar/list, but the SELECT/WHERE/aggregation chose the wrong filter or aggregation. P1 catches the scalar-zero shape but Planner often can't recover within budget. Next levers: better Planner-Harness coupling, deeper QuestionSpec, or domain-rule extraction.
 
 ### Reverted Experiments — Do Not Re-Attempt (without new approach)
 

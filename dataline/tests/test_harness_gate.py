@@ -489,6 +489,48 @@ class TestFilterNoEffect:
         )
         assert not any(f.rule == "filter_no_effect" for f in flags)
 
+    # --- Non-KDD synthetic coverage (audit 2026-05-20) ---
+    # The rule must work on shapes that have nothing to do with the KDD
+    # benchmark — financial domain, IoT/sensor domain, epidemiology.
+
+    def test_financial_rate_zero_warns(self):
+        """Finance: 'chargeback rate' = 0 is suspicious on a filter
+        question — likely the WHERE on payment_type or month missed."""
+        s = _make_structured({"chargeback_rate": [0.0]})
+        flags = _check_filter_no_effect(
+            "What is the chargeback rate for Visa transactions in Q3?",
+            s, self._spec(), [],
+        )
+        assert any(f.rule == "filter_no_effect" for f in flags)
+
+    def test_sensor_threshold_count_zero_warns(self):
+        """IoT: 'how many sensor readings exceeded threshold' = 0 is
+        suspicious — likely the threshold parsed wrong."""
+        s = _make_structured({"cnt": [0]})
+        flags = _check_filter_no_effect(
+            "How many sensor readings exceeded the 75dB threshold last week?",
+            s, self._spec(), [],
+        )
+        assert any(f.rule == "filter_no_effect" for f in flags)
+
+    def test_epidemiology_prevalence_zero_warns(self):
+        """Clinical: 'prevalence of X' = 0 is suspicious."""
+        s = _make_structured({"prevalence": [0]})
+        flags = _check_filter_no_effect(
+            "What was the prevalence of hypertension in the 50-65 age group?",
+            s, self._spec(), [],
+        )
+        assert any(f.rule == "filter_no_effect" for f in flags)
+
+    def test_share_synonym_fires(self):
+        """'share of X' is a finance/market synonym for percentage."""
+        s = _make_structured({"share": [0]})
+        flags = _check_filter_no_effect(
+            "What share of orders shipped on time in November?",
+            s, self._spec(), [],
+        )
+        assert any(f.rule == "filter_no_effect" for f in flags)
+
 
 # ---------------------------------------------------------------------------
 # P2: internal-id columns in answer (extra_columns BLOCK)
