@@ -186,19 +186,15 @@ def _load_full_distinct_if_low_cardinality(
             df = pd.read_csv(file_path, usecols=[name])
             return sorted(set(str(v) for v in df[name].dropna()))
         if suffix == ".json":
-            import pandas as pd
-            obj = json.loads(Path(file_path).read_text())
-            # TODO (P5 generalisation): {"records":[...]} is the KDD Airtable
-            # export shape. Other benchmarks may use top-level lists, nested
-            # arrays under different keys, or JSONL streams. When generalising,
-            # delegate JSON shape detection to safe_read_json_df rather than
-            # hard-coding "records".
-            if isinstance(obj, dict) and "records" in obj:
-                obj = obj["records"]
-            if isinstance(obj, list) and obj and isinstance(obj[0], dict):
-                df = pd.DataFrame(obj)
-                if name in df.columns:
-                    return sorted(set(str(v) for v in df[name].dropna()))
+            # Delegate JSON shape detection to safe_read_json_df, which handles
+            # {"records":[...]}, {"table":..., "records":[...]}, top-level
+            # list-of-dicts, and other nested-array shapes. This is the same
+            # function used by production code, so live-loading sees the same
+            # DataFrame the planner does — universal across JSON conventions.
+            from ..helpers.data_helpers import safe_read_json_df
+            df = safe_read_json_df(file_path)
+            if name in df.columns:
+                return sorted(set(str(v) for v in df[name].dropna()))
     except Exception:
         # Silent skip — live-load failures should never break the agent.
         return []
