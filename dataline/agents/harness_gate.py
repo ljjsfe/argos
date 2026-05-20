@@ -1321,6 +1321,12 @@ def _check_sql_static(
     except Exception:
         pass  # fail-open
 
+    # --- #13: SQL identifier approximate match against manifest ---
+    try:
+        _check_sql_identifier_typo(stmt, data_profile, flags)
+    except Exception:
+        pass  # fail-open
+
     return flags
 
 
@@ -1521,6 +1527,83 @@ def _check_left_join_null_guard(stmt, flags: list[HarnessFlag]) -> None:
                 f"an INNER JOIN. Either move the predicate into the ON clause, "
                 f"add `OR {tbl}.{col} IS NULL`, or switch to INNER JOIN if "
                 f"unmatched rows shouldn't appear in the result."
+            ),
+        ))
+
+
+# ---------------------------------------------------------------------------
+# #13: SQL identifier approximate match (typo / schema mismatch detector)
+#
+# Catches the "no such column" / "Unknown column" failure mode BEFORE
+# execution: when a SQL identifier (column or table) referenced in code
+# doesn't appear in the manifest, find the closest match and emit a WARN
+# with a suggested correction. Universal SQL hygiene — any RDBMS will
+# error out on unknown identifiers; pre-emptive detection saves an iter.
+#
+# Pure stdlib: difflib.get_close_matches for fuzzy similarity (no extra
+# dep). Conservative threshold (0.7) to avoid false positives on legit
+# new-table-aliased queries.
+# ---------------------------------------------------------------------------
+
+
+def _check_sql_identifier_typo(stmt, data_profile: str, flags: list[HarnessFlag]) -> None:
+    """Detect SQL column references not present in manifest, suggest closest match.
+
+    - Extracts manifest column names from `data_profile` lines like
+      "col_name (dtype, N distinct): val1, val2".
+    - Extracts column refs from SQL AST (exp.Column.name).
+    - For each unknown SQL column, suggest a manifest column with high
+      string similarity. WARN-only.
+
+    Fail-open on any parse issue (caller wraps in try/except).
+    """
+    import re as _re
+    import difflib
+
+    # 1. Collect manifest column names. Pattern from _check_where_literals.
+    manifest_cols: set[str] = set()
+    for line in data_profile.split("\n"):
+        m = _re.match(r"\s*(\w+)\s+\([^)]*\d+\s*distinct\):", line, _re.IGNORECASE)
+        if m:
+            manifest_cols.add(m.group(1).lower())
+        # Also catch "col_name (dtype):" without distinct count
+        m2 = _re.match(r"\s*-\s+(\w+)\s+\([^)]+\):", line, _re.IGNORECASE)
+        if m2:
+            manifest_cols.add(m2.group(1).lower())
+
+    if not manifest_cols:
+        return  # no manifest signal — can't suggest
+
+    # 2. Collect column references from SQL.
+    from sqlglot import exp
+    sql_cols: set[str] = set()
+    for col in stmt.find_all(exp.Column):
+        name = (col.name or "").lower()
+        if name and name != "*":
+            sql_cols.add(name)
+
+    # 3. Find unknowns + suggest.
+    seen_flags: set[str] = set()
+    for sql_col in sql_cols:
+        if sql_col in manifest_cols:
+            continue
+        # Use a fairly high cutoff to avoid noisy suggestions.
+        suggestions = difflib.get_close_matches(
+            sql_col, manifest_cols, n=2, cutoff=0.7,
+        )
+        if not suggestions:
+            continue
+        if sql_col in seen_flags:
+            continue
+        seen_flags.add(sql_col)
+        flags.append(HarnessFlag(
+            rule="sql_identifier_typo",
+            severity="warn",
+            message=(
+                f"SQL references column `{sql_col}` which is not in the "
+                f"data manifest. Closest manifest columns: {suggestions}. "
+                f"Check for typo / schema mismatch (e.g. `constructorId` "
+                f"vs `constructor_id`)."
             ),
         ))
 

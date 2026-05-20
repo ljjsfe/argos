@@ -706,6 +706,46 @@ class TestCountDistinctNeeded:
         assert not any(f.rule == "count_distinct_needed" for f in flags)
 
 
+class TestSqlIdentifierTypo:
+    """#13: SQL column typo / schema-mismatch detection via manifest
+    fuzzy match. Catches `constructorId` vs `constructor_id` style
+    failures BEFORE execution. Universal SQL hygiene."""
+
+    DP = (
+        "- constructor_id (integer, 100 distinct): 1, 2, 3\n"
+        "- constructor_ref (text, 100 distinct): mercedes, ferrari\n"
+        "- race_id (integer, 200 distinct): 1, 2, 3\n"
+    )
+
+    def _run(self, sql, dp=None):
+        from dataline.agents.harness_gate import _check_sql_static
+        # explicit None check — "" is intentionally falsy ≠ default
+        return _check_sql_static(sql, self.DP if dp is None else dp, QuestionSpec())
+
+    def test_camelcase_vs_snakecase_fires(self):
+        flags = self._run("SELECT * FROM t WHERE constructorId = 1")
+        assert any(f.rule == "sql_identifier_typo" for f in flags)
+
+    def test_exact_match_does_not_fire(self):
+        flags = self._run("SELECT * FROM t WHERE constructor_id = 1")
+        assert not any(f.rule == "sql_identifier_typo" for f in flags)
+
+    def test_no_manifest_does_not_fire(self):
+        flags = self._run("SELECT * FROM t WHERE constructorId = 1", dp="")
+        assert not any(f.rule == "sql_identifier_typo" for f in flags)
+
+    def test_far_off_name_does_not_suggest(self):
+        # 'foobarbaz' shouldn't suggest any manifest col (cutoff 0.7)
+        flags = self._run("SELECT * FROM t WHERE foobarbaz = 1")
+        assert not any(f.rule == "sql_identifier_typo" for f in flags)
+
+    def test_suggestion_includes_close_matches(self):
+        flags = self._run("SELECT * FROM t WHERE race_idx = 1")  # race_id close
+        njg = [f for f in flags if f.rule == "sql_identifier_typo"]
+        assert njg
+        assert "race_id" in njg[0].message
+
+
 class TestInternalIdColumnBlock:
     """Catches v92 task_330: pred had `home_team_api_id`, `away_team_api_id`
     leaking as columns alongside the legitimate answer. These are universal
