@@ -117,8 +117,13 @@ def stratified_sample(cands: list[dict], n: int) -> list[dict]:
     picked: list[dict] = []
     for k in sorted(buckets):
         items = sorted(buckets[k], key=lambda c: -eval_version(c["eval_dir"]))
-        rng.shuffle(items[: 2 * per])
-        picked.extend(items[:per])
+        # Take the top 2*per candidates by recency, then shuffle ON THE COPY
+        # and re-bind so we actually pick a random subset of the recent pool
+        # rather than the deterministic head. The previous `rng.shuffle(items[:2*per])`
+        # was a no-op — shuffle mutates the slice copy, then it's discarded.
+        head = items[: 2 * per]
+        rng.shuffle(head)
+        picked.extend(head[:per])
     rng.shuffle([c for c in cands if c not in picked])
     pool = [c for c in cands if c not in picked]
     rng.shuffle(pool)
