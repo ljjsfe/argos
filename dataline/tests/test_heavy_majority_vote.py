@@ -53,6 +53,25 @@ class TestNormalizeCsv:
         b = _normalize_csv("name\nmclaren")
         assert a != b
 
+    def test_empty_data_row_is_dropped(self):
+        """task_352-style: 'ratio\\n""\\n' must NOT produce a non-empty signature.
+
+        Previously this caused two trajectories to wrongly agree on the
+        empty-string data row → false majority. The fix: rows that are
+        all-blank after normalisation are dropped, and if no real data
+        rows remain the signature is empty.
+        """
+        assert _normalize_csv('ratio\n""') == ""
+        assert _normalize_csv("ratio\n  ,  ") == ""
+        assert _normalize_csv("ratio\nNaN\n") == ""
+
+    def test_partial_blank_row_still_kept(self):
+        # If at least one cell is non-blank, the row remains.
+        sig = _normalize_csv("name,age\nalice,")
+        assert sig != ""
+        # Header dropped, sig should reflect 2 columns.
+        assert sig.startswith("cols=2")
+
 
 # ---- _majority_vote ----
 
@@ -99,6 +118,17 @@ class TestMajorityVote:
             _t(1, ""),
             _t(2, "x\n42"),
         ]
+        assert _majority_vote(trajs) is None
+
+    def test_empty_data_row_does_not_win(self):
+        """Two trajectories with all-empty data rows must not form a majority
+        (task_352 bug). The third trajectory is the only real candidate."""
+        trajs = [
+            _t(0, 'ratio\n""'),
+            _t(1, 'ratio\n""'),
+            _t(2, "ratio\n2.73"),
+        ]
+        # No majority on real data → fall through to LLM.
         assert _majority_vote(trajs) is None
 
     def test_single_trajectory(self):
