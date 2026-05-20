@@ -209,6 +209,15 @@ def _write_doc(tmp_path: Path, body: str = "# Title\nSome content."):
     (tmp_path / "context/knowledge.md").write_text(body)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_cache(tmp_path, monkeypatch):
+    """Redirect _REPO_ROOT_CACHE to a per-test tmp dir so the content-hash
+    cache doesn't leak state across tests (cache key is now content-only,
+    so identical-doc tests would share entries without this isolation)."""
+    import dataline.agents.doc_glossary as dg
+    monkeypatch.setattr(dg, "_REPO_ROOT_CACHE", tmp_path / "_cache_iso")
+
+
 class TestExtract:
     def test_no_docs_returns_empty(self, tmp_path):
         (tmp_path / "task.json").write_text('{"task_id":"t","question":"?"}')
@@ -345,3 +354,24 @@ def test_cache_key_stable(tmp_path):
     # Same model + content → same key
     k4 = _cache_key(files, "model-x")
     assert k1 == k4
+
+
+def test_cache_key_is_content_derived_not_path(tmp_path):
+    """Two files with identical bytes at different paths must produce the
+    same cache key — comment in doc_glossary.py says cross-task sharing
+    works naturally when docs repeat. Verify the implementation matches.
+    """
+    (tmp_path / "task_a").mkdir()
+    (tmp_path / "task_b").mkdir()
+    bytes_ = "## Glossary\n- **Foo**: bar.\n"
+    (tmp_path / "task_a" / "knowledge.md").write_text(bytes_)
+    (tmp_path / "task_b" / "knowledge.md").write_text(bytes_)
+
+    k_a = _cache_key([tmp_path / "task_a" / "knowledge.md"], "model-x")
+    k_b = _cache_key([tmp_path / "task_b" / "knowledge.md"], "model-x")
+    assert k_a == k_b, "Identical content at different paths must share cache"
+
+    # And: same path, different content → different key
+    (tmp_path / "task_b" / "knowledge.md").write_text("## Other\n")
+    k_b2 = _cache_key([tmp_path / "task_b" / "knowledge.md"], "model-x")
+    assert k_a != k_b2

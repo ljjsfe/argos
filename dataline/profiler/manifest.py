@@ -46,6 +46,7 @@ READERS = {
 # These patterns are conservative — they match output-naming conventions across
 # data-agent projects (not KDD-specific): result.json, prediction.csv, etc.
 RESERVED_FILENAMES = frozenset({
+    # Agent outputs (this project)
     "result.json",
     "step_result.json",
     "prediction.csv",
@@ -53,6 +54,19 @@ RESERVED_FILENAMES = frozenset({
     "trace_agent.json",
     "status.json",
     "final_answer.txt",
+    # Benchmark gold/ground-truth files (universal hygiene).
+    # If any of these end up inside task_dir (misconfigured layout, manual
+    # copy during testing, third-party benchmark with non-standard layout)
+    # the agent could otherwise read the answer directly, producing fake-
+    # high scores. List is conservative — only strongly benchmark-flavored
+    # names. `answers.csv` / `reference.csv` are intentionally NOT here
+    # because they're legitimate data file names in many real datasets.
+    "gold.csv",
+    "gold.json",
+    "ground_truth.csv",
+    "ground_truth.json",
+    "solution.csv",
+    "solution.json",
 })
 RESERVED_SUFFIXES = ("_result.json", "_prediction.csv", "_results.pkl")
 RESERVED_PREFIXES = ("intermediate_", "step_")

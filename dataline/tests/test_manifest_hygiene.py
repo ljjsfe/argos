@@ -145,6 +145,32 @@ class TestScanBlacklist:
         paths = {Path(e.file_path).relative_to(tmp_path).as_posix() for e in manifest.entries}
         assert paths == {"context/csv/x.csv"}
 
+    def test_skips_benchmark_gold_files(self, tmp_path):
+        """Gold / ground-truth files mistakenly placed inside task_dir
+        must NOT be read as input — would give fake-high scores."""
+        _write(tmp_path / "task.json", "{}")
+        _write(tmp_path / "context/csv/x.csv", "a\n1\n")
+        _write(tmp_path / "gold.csv", "answer\n42\n")
+        _write(tmp_path / "ground_truth.csv", "answer\n42\n")
+        _write(tmp_path / "solution.json", '{"answer": 42}')
+        _write(tmp_path / "context/gold.csv", "answer\n42\n")  # nested
+        manifest = scan(str(tmp_path))
+        paths = {Path(e.file_path).relative_to(tmp_path).as_posix() for e in manifest.entries}
+        # All gold/solution files are filtered, regardless of location.
+        assert paths == {"context/csv/x.csv"}
+
+    def test_legitimate_data_filenames_kept(self, tmp_path):
+        """`answers.csv` and `reference.csv` are NOT in the reserved list
+        — they're legitimate data file names in many real datasets
+        (quizzes, evaluations where answers ARE the data)."""
+        _write(tmp_path / "task.json", "{}")
+        _write(tmp_path / "context/csv/answers.csv", "q,a\n1,foo\n")
+        _write(tmp_path / "context/csv/reference.csv", "k,v\n1,bar\n")
+        manifest = scan(str(tmp_path))
+        paths = {Path(e.file_path).relative_to(tmp_path).as_posix() for e in manifest.entries}
+        assert "context/csv/answers.csv" in paths
+        assert "context/csv/reference.csv" in paths
+
 
 class TestScanDotDirs:
     """Profiler must not descend into dot-directories (e.g., self-created

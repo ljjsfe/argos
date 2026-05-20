@@ -150,17 +150,29 @@ def _read_and_concat(files: list[Path], max_bytes: int) -> tuple[str, list[str]]
 # ── Cache helpers ─────────────────────────────────────────────────
 
 def _cache_key(file_paths: list[Path], model_name: str) -> str:
+    """Content-derived cache key — does NOT include filesystem path.
+
+    Two tasks with identical doc bytes (e.g. same knowledge.md) share a
+    single cache entry. This is safe because B2 only extracts terms/
+    formulas from the doc bytes themselves — the result is independent of
+    where the file lives. Cross-task sharing saves one LLM call per task
+    when docs repeat (common across same-domain benchmarks).
+    """
     h = hashlib.sha256()
     h.update(SCHEMA_VERSION.encode())
     h.update(b"|")
     h.update(model_name.encode())
-    for p in sorted(str(x.resolve()) for x in file_paths):
-        h.update(p.encode())
+    # Read all bytes first, then sort by content hash so order is stable
+    # regardless of path or input order.
+    blobs: list[bytes] = []
+    for p in file_paths:
         try:
-            h.update(b":")
-            h.update(p.encode() if isinstance(p, bytes) else Path(p).read_bytes())
-        except (OSError, AttributeError):
-            pass
+            blobs.append(Path(p).read_bytes())
+        except OSError:
+            continue
+    for b in sorted(blobs):
+        h.update(b"|")
+        h.update(hashlib.sha256(b).digest())
     return h.hexdigest()[:32]
 
 
