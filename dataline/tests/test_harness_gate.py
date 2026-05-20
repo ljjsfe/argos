@@ -533,6 +533,68 @@ class TestFilterNoEffect:
 
 
 # ---------------------------------------------------------------------------
+# Phase B: _check_qa_column_count gated on QuestionSpec confidence
+# ---------------------------------------------------------------------------
+
+from dataline.agents.harness_gate import _check_qa_column_count
+
+
+class TestQaColumnCountConfidenceGate:
+    """v92 audit found _check_qa_column_count BLOCKed a correct 2-col
+    answer on a 2-clause question ('Identify X. Name the user who Y.')
+    where QuestionSpec under-counted to 1 column. Fix: only BLOCK when
+    spec.computation_type is one of the narrow high-confidence shapes
+    ({count, ratio}). Mirrors QuestionSpec.to_guidance() gating."""
+
+    def _spec(self, expected_cols=1, comp_type="unknown", a_type="scalar"):
+        return QuestionSpec(
+            expected_column_count=expected_cols,
+            computation_type=comp_type,
+            answer_type=a_type,
+        )
+
+    def test_high_confidence_count_2x_blocks(self):
+        """count question, 2-col over-prediction → still BLOCK."""
+        s = _make_structured({"cnt": [5], "extra": [99]})
+        flags = _check_qa_column_count(self._spec(1, "count"), s)
+        assert any(f.severity == "block" for f in flags)
+
+    def test_low_confidence_2x_warns_only(self):
+        """answer_type=scalar but computation_type=unknown — the 2-clause
+        question case. Must NOT block."""
+        s = _make_structured({"col1": ["a"], "col2": ["b"]})
+        flags = _check_qa_column_count(self._spec(1, "unknown"), s)
+        assert flags  # rule still fires (WARN)
+        assert not any(f.severity == "block" for f in flags)
+        assert any(f.severity == "warn" for f in flags)
+
+    def test_low_confidence_lookup_does_not_block(self):
+        """Lookup questions: spec.computation_type='lookup' is not
+        high-confidence enough to BLOCK extra columns."""
+        s = _make_structured({"col1": ["x"], "col2": ["y"], "col3": ["z"]})
+        flags = _check_qa_column_count(self._spec(1, "lookup"), s)
+        assert not any(f.severity == "block" for f in flags)
+
+    def test_high_confidence_ratio_2x_blocks(self):
+        s = _make_structured({"r": [0.5], "extra1": [1], "extra2": [2]})
+        flags = _check_qa_column_count(self._spec(1, "ratio"), s)
+        assert any(f.severity == "block" for f in flags)
+
+    def test_missing_columns_always_warns(self):
+        """Under-count remains WARN regardless of confidence — symmetry
+        with original semantics."""
+        s = _make_structured({"col1": ["a"]})
+        flags = _check_qa_column_count(self._spec(3, "count"), s)
+        assert flags
+        assert any(f.severity == "warn" for f in flags)
+
+    def test_zero_expected_returns_nothing(self):
+        s = _make_structured({"x": [1], "y": [2]})
+        flags = _check_qa_column_count(self._spec(0, "count"), s)
+        assert flags == []
+
+
+# ---------------------------------------------------------------------------
 # P2: internal-id columns in answer (extra_columns BLOCK)
 # ---------------------------------------------------------------------------
 
