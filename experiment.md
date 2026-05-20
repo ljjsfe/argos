@@ -567,7 +567,62 @@ hypothesis is now strongly supported by 5 independent data points.**
 
 ---
 
-## v87 — A3 + A1 + A2 combined (2026-05-19) — SHIPPED (pending audit)
+## v87 — A3 + A1 + A2 combined (2026-05-19) — **VERDICT: SUSPECT**
+
+### Audit conclusion (2026-05-19, docs/V87_INDEPENDENT_AUDIT.md)
+
+Independent adversarial audit verdict: **SUSPECT** (not REAL, not FALSE).
+The +10pp framing inflates a +4-task signal that is statistically
+indistinguishable from noise on this 50-task eval (P=0.21 under
+pure-noise null).
+
+Real wins identified:
+- task_25 — verified by `heavy_trajectories.json`: baseline wrong, 2
+  heavy trajectories converged on correct answer, A3 majority-vote
+  correctly picked the majority (where v86 deliberator picked baseline)
+- task_415 — plausible A2 win ("reference name" → driverRef binding)
+
+Variance bounce-back (not new capability):
+- task_22 and task_196 — were v80=1 / v86=0 variance regressions;
+  v87 just bounces back to v80 behaviour
+- task_11, task_418 — mixed-attribution lifts, hard to isolate
+
+Procedural violation:
+- Commits `3d22080` (A3) and `7b4b903` (A2) cite task_257's
+  heavy_trajectories ("2/3 trajectories agreed on 1708 views").
+  task_257 was in holdout — the discipline forbids inspecting
+  intermediate output. Holdout reduced to N=4 (see eval_split/holdout.txt).
+
+A3 bug also found and fixed (`10061a8`): empty-string data rows could
+falsely form a majority signature.
+
+No code-path leakage. A1 reads from manifest entries already filtered
+by Profiler L3 blacklist. A2 reads only knowledge.md / context/doc.
+A3 normalisation mirrors KDD scorer behaviour (universal at the
+mechanism level; the 2dp tolerance is KDD-specific — TODO in code).
+
+### Honest re-framing
+
+| metric | claim | reality |
+|---|---|---|
+| v87 vs v86 | +10pp | net +4 tasks ≈ +8pp, within noise band |
+| "Real" lift | 6 lifts | 2 attributable + 2 variance bounce + 2 mixed |
+| Universal capability | "A3+A1+A2 are universal" | mechanism universal; A2 implementation KDD-style-tied; A1 has KDD-shape assumptions; A3 normalisation KDD-tolerance-aligned |
+
+Path forward (post-audit, scheduled before next ship gate):
+- B2 doc-glossary design (docs/B2_DOC_GLOSSARY_DESIGN.md, by independent
+  agent without KDD exposure) → replaces A2
+- A1 generalisation (lift JSON-shape + English-stopword assumptions)
+- A3 tolerance plugin (KDD 2dp / exact / configurable)
+- Re-run full eval after all four → only THEN claim universal strong
+
+---
+
+## v87 — original (pre-audit) framing — preserved for history
+
+After the leak-discovery (v85/v86), we shipped three independent
+mechanisms targeting the Qwen-specific failure modes observed in
+Phase 0 SC1 and the v86 heavy-mode trajectories:
 
 After the leak-discovery (v85/v86), we shipped three independent
 mechanisms targeting the Qwen-specific failure modes observed in
