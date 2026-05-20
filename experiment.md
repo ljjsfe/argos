@@ -567,6 +567,32 @@ hypothesis is now strongly supported by 5 independent data points.**
 
 ---
 
+## v88 — Hypothesis Matrix (pre-commit, 2026-05-19)
+
+Recorded BEFORE running the v88 full eval per pre-eval audit recommendation
+(docs/PRE_V88_AUDIT.md §5):
+
+| v88 outcome vs v87 (0.720) | interpretation |
+|---|---|
+| v88 ≥ v87 + 0.10pp (≥+5 tasks) | strong B2 / generalisation lift above noise |
+| v88 within ±0.08pp (±4 tasks) | ambiguous; LLM variance dominates this single run |
+| v88 < v87 − 0.10pp | regression — investigate B2 prompt-injection or A2/B2 interaction |
+
+Pre-committed: **no claim of "real lift" without ablation eval** (A2-off
+vs A2-on) regardless of v88 outcome. The audit explicitly flagged that
+attribution between A2 and B2 cannot be isolated from this single run.
+
+Stack under test (vs v87):
+- Same: S1 + L1 + L2 + A1 (focus_hints) + A2 (term_binding) + A3 (majority-vote)
+- New: A1 P5 (JSON shape via safe_read_json_df)
+- New: A3 P6 (tolerance plugin, default kdd_2dp — byte-identical to prior)
+- New: B2 (LLM-extracted doc glossary, hint section at priority 92)
+- A3 empty-row fix (10061a8) — also part of v88
+
+Expected costs: ~$60 + $1-2 B2 calls (cold cache).
+
+---
+
 ## v87 — A3 + A1 + A2 combined (2026-05-19) — **VERDICT: SUSPECT**
 
 ### Audit conclusion (2026-05-19, docs/V87_INDEPENDENT_AUDIT.md)
