@@ -232,6 +232,36 @@ class TestExtract:
         g = extract_doc_glossary(str(tmp_path), None, llm)
         assert g.terms == ()
 
+    def test_fresh_llm_response_sanitized_at_boundary(self, tmp_path):
+        """2026-05-20 audit recommendation: defense-in-depth. If an LLM
+        ever emits an absolute path (today shouldn't happen because the
+        prompt header is already relativized, but future prompt drift /
+        model quirks could re-introduce), we sanitize at the boundary
+        before persisting to cache and returning to caller."""
+        _write_doc(tmp_path, "# notes\n")
+        abs_path = str(tmp_path / "context" / "knowledge.md")
+        # LLM returns a response with raw absolute path slipped in.
+        llm = _FakeLLM({
+            "schema_version": SCHEMA_VERSION,
+            "source_files": [abs_path],
+            "terms": [{
+                "name": "Foo", "aliases": [], "definition": "x.",
+                "data_field": {"table_or_file": None, "column": None},
+                "value_enum": [], "value_range": None,
+                # Plant absolute path here too.
+                "source_section": abs_path,
+            }],
+            "formulas": [], "rules": [], "synonyms": [],
+        })
+        g = extract_doc_glossary(str(tmp_path), None, llm)
+        # Must be sanitized before reaching caller.
+        assert all(str(tmp_path) not in s for s in g.source_files), (
+            f"source_files leaked: {g.source_files}"
+        )
+        assert all(str(tmp_path) not in t.source_section for t in g.terms), (
+            f"source_section leaked: {[t.source_section for t in g.terms]}"
+        )
+
     def test_basic_extraction(self, tmp_path):
         _write_doc(tmp_path, "### Glossary\n- **Foo**: a thing.\n")
         llm = _FakeLLM({

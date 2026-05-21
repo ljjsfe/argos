@@ -516,6 +516,13 @@ def extract_doc_glossary(
     parsed.setdefault("source_files", paths_used)
 
     glossary = _from_dict(parsed)
+    # Defense-in-depth: sanitize raw absolute paths even from fresh LLM
+    # responses before persisting + returning. Prompt header is already
+    # relativized so this should be a no-op today, but if a future
+    # prompt change or LLM quirk re-introduces abs paths we want them
+    # caught at the boundary — not landing in the cache or planner hints.
+    # (2026-05-20 audit follow-up recommendation.)
+    glossary = _sanitize_cache_paths(glossary, td)
     _save_cache(td, key, glossary)
     return glossary
 
