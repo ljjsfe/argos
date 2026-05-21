@@ -31,7 +31,10 @@ from ..core.types import Manifest
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "b2.v1"
+# Bumped 2026-05-20 from b2.v1: path sanitization for source_files /
+# source_section to close raw-task-dir leak via warm cache. Old caches
+# remain on disk but won't be reused because cache_key hashes this version.
+SCHEMA_VERSION = "b2.v2"
 _MAX_DOC_BYTES_DEFAULT = 20_000
 
 
@@ -202,12 +205,69 @@ def _cache_paths(task_dir: Path, key: str) -> list[Path]:
     return candidates
 
 
+def _sanitize_cache_paths(glossary: DocGlossary, task_dir: Path) -> DocGlossary:
+    """Defensive sanitization for cache hits — strip any absolute task_dir
+    that leaked through from a prior code version (or a corrupt cache).
+
+    The schema-version bump (b2.v1 → b2.v2) already invalidates stale
+    caches via the content hash, but this is a belt-and-suspenders pass:
+    even a v2 cache containing an unexpected absolute path is scrubbed
+    here before reaching the planner-hint surface. 2026-05-20 audit fix.
+    """
+    from ..profiler.manifest import safe_relative_path
+    root = str(task_dir)
+
+    def _safe(s: str) -> str:
+        if not s:
+            return s
+        # Only relativize if it looks like a filesystem path under task_dir.
+        if root in s:
+            return safe_relative_path(s, root)
+        return s
+
+    # source_files
+    new_files = tuple(_safe(s) for s in glossary.source_files)
+    # source_section on terms / formulas / rules
+    new_terms = tuple(
+        TermDefV2(
+            name=t.name, aliases=t.aliases, definition=t.definition,
+            data_field_table=_safe(t.data_field_table) if t.data_field_table else t.data_field_table,
+            data_field_column=t.data_field_column,
+            value_enum=t.value_enum,
+            value_range_min=t.value_range_min,
+            value_range_max=t.value_range_max,
+            value_range_unit=t.value_range_unit,
+            source_section=_safe(t.source_section),
+        ) for t in glossary.terms
+    )
+    new_formulas = tuple(
+        FormulaDef(
+            name=f.name, expression=f.expression, inputs=f.inputs,
+            source_section=_safe(f.source_section),
+        ) for f in glossary.formulas
+    )
+    new_rules = tuple(
+        RuleDef(
+            statement=r.statement, applies_to=r.applies_to,
+            source_section=_safe(r.source_section),
+        ) for r in glossary.rules
+    )
+    return DocGlossary(
+        schema_version=glossary.schema_version,
+        source_files=new_files,
+        terms=new_terms,
+        formulas=new_formulas,
+        rules=new_rules,
+        synonyms=glossary.synonyms,
+    )
+
+
 def _load_cache(task_dir: Path, key: str) -> DocGlossary | None:
     for p in _cache_paths(task_dir, key):
         if p.is_file():
             try:
                 obj = json.loads(p.read_text(encoding="utf-8"))
-                return _from_dict(obj)
+                return _sanitize_cache_paths(_from_dict(obj), task_dir)
             except (OSError, ValueError):
                 continue
     return None

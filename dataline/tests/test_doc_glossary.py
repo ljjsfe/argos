@@ -341,6 +341,56 @@ class TestCacheLocation:
 
 # ── cache key stability ──────────────────────────────────────────
 
+def test_warm_cache_sanitizes_legacy_raw_paths(tmp_path, monkeypatch):
+    """2026-05-20 audit follow-up: even if an old (b2.v1) cache file with
+    raw absolute paths in source_files / source_section is loaded, the
+    output must be sanitized so the planner never sees a raw task_dir
+    (which would let agent code bypass scratch via open('/abs/...')).
+
+    Defense-in-depth on top of the schema-version bump (which makes the
+    cache_key reject stale entries via the content hash).
+    """
+    import json
+    import dataline.agents.doc_glossary as dg
+
+    task_dir = tmp_path / "task"
+    task_dir.mkdir()
+    (task_dir / "context").mkdir()
+    (task_dir / "context" / "knowledge.md").write_text("# notes\n")
+
+    fake_cache_root = tmp_path / "fake_cache"
+    monkeypatch.setattr(dg, "_REPO_ROOT_CACHE", fake_cache_root)
+    fake_cache_root.mkdir()
+
+    legacy_payload = {
+        "schema_version": "b2.v1",  # old, but we still load and sanitize
+        "source_files": [str(task_dir / "context" / "knowledge.md")],
+        "terms": [{
+            "name": "Foo",
+            "definition": "metric.",
+            "source_section": str(task_dir / "context" / "knowledge.md"),
+            "data_field": {"table_or_file": None, "column": None},
+            "value_enum": [],
+            "value_range": None,
+        }],
+        "formulas": [],
+        "rules": [],
+        "synonyms": [],
+    }
+    # Cache key per current SCHEMA_VERSION + model — we forge the file
+    # at the path the loader would query.
+    files = [task_dir / "context" / "knowledge.md"]
+    key = dg._cache_key(files, "test-model")
+    (fake_cache_root / f"{key}.json").write_text(json.dumps(legacy_payload))
+
+    loaded = dg._load_cache(task_dir, key)
+    assert loaded is not None, "test setup: cache file should be readable"
+    assert all(str(task_dir) not in s for s in loaded.source_files)
+    assert all(str(task_dir) not in t.source_section for t in loaded.terms)
+    # And the relative form should be present.
+    assert any("context/knowledge.md" in s for s in loaded.source_files)
+
+
 def test_read_and_concat_uses_relative_paths(tmp_path):
     """2026-05-20 audit follow-up: B2 _read_and_concat must sanitize
     file paths in the prompt header. Raw absolute task_dir in header

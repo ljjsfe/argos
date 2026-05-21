@@ -549,8 +549,7 @@ class Sandbox:
                 self._materialize(os.path.join(root, fname), str(link))
 
         # data_helpers must be available for `import data_helpers` from cwd.
-        # Hardlink for consistency (no path-leak risk; symlink would also be
-        # fine since this is our own file, but uniform = simpler).
+        # Copy via _materialize for uniform semantics with the rest of scratch.
         helpers = Path(self._temp_dir) / "data_helpers.py"
         if helpers.exists():
             link = Path(scratch) / "data_helpers.py"
