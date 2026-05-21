@@ -229,11 +229,19 @@ class Sandbox:
         self._temp_dir = tempfile.mkdtemp(prefix="dataline_")
         self._step_count = 0
         self._stateful_repl = stateful_repl
-        # Extra CSV paths to symlink into scratch dir on each execute().
+        # Extra CSV paths to symlink into scratch dir on first build.
         # Set by orchestrator after Profiler doc-extraction step (Block 4).
         # Each tuple is (link_basename, absolute_csv_path) so the link can
         # use a friendly DuckDB view name regardless of the cache filename.
         self.extra_csv_links: list[tuple[str, str]] = []
+        # Filtered task-view: lazy-built by _build_scratch and reused across
+        # all execute() calls. CRITICAL: this is the path passed to subprocess
+        # as TASK_DIR (and to StatefulPythonExec) so that SQL wrapper + Python
+        # helpers + Python cwd all see the SAME filtered view of the input.
+        # The original self._task_dir is still used for the L2 leak-guard
+        # snapshot (so writes back to the real input are still detected).
+        # See 2026-05-20 audit Finding 1/2/3.
+        self._scratch_dir: str | None = None
         self._install_helpers()
 
     @property
@@ -290,11 +298,17 @@ class Sandbox:
         else:
             run_dir = self._temp_dir
 
+        # Pick the TASK_DIR to expose to user code: filtered scratch view
+        # (default — closes audit Finding 1/2), or the raw task_dir as the
+        # legacy fallback when scratch is disabled. Critical for SQL wrapper
+        # + helpers + Python cwd to share one filtered surface.
+        runtime_task_dir = self._scratch_dir if (use_scratch and self._scratch_dir) else self._task_dir
+
         # Stateful REPL path: in-process Python with persistent globals.
         # No os.chdir — process-global cwd would race other workers. Helpers
         # use thread-local TASK_DIR (set inside REPL.execute) for path
-        # resolution. Agent code that uses raw relative paths will fail by
-        # design — prompt nudges agent toward safe_read_* helpers.
+        # resolution. _build_scratch above rebinds repl._task_dir → scratch
+        # so the set_task_context call inside REPL points at the filtered view.
         if self._stateful_repl is not None and language == "python":
             result = self._execute_via_repl(code, step_id, prior_step_json)
             return _strip_task_dir_writes(result, self._task_dir, pre_snapshot)
@@ -304,7 +318,7 @@ class Sandbox:
         code_path.write_text(code, encoding="utf-8")
 
         env = os.environ.copy()
-        env["TASK_DIR"] = self._task_dir
+        env["TASK_DIR"] = runtime_task_dir
         env["TEMP_DIR"] = self._temp_dir
         env["PYTHONIOENCODING"] = "utf-8"
         # Add TEMP_DIR to PYTHONPATH so `import data_helpers` works from any cwd
@@ -352,9 +366,12 @@ class Sandbox:
                 step_id=step_id,
             )
         finally:
-            # Clean up scratch dir (symlinks only, no real data deleted)
-            if use_scratch and os.path.exists(run_dir) and run_dir != self._temp_dir:
-                shutil.rmtree(run_dir, ignore_errors=True)
+            # NOTE: scratch is now memoized per-Sandbox-instance (single dir
+            # reused across execute() calls). Do NOT delete it here — the
+            # 2026-05-20 FilteredTaskView refactor relies on the scratch
+            # persisting across iterations. It's cleaned up automatically
+            # when _temp_dir is removed at process / Sandbox tear-down.
+            pass
 
     def _execute_via_repl(
         self, code: str, step_id: str, prior_step_json: str = "",
@@ -405,49 +422,72 @@ class Sandbox:
         return _SQL_RUNNER_TEMPLATE.replace("__SQL_PLACEHOLDER__", escaped_sql)
 
     def _build_scratch(self) -> str:
-        """Create a scratch directory with symlinks to all task files.
+        """Build (or return cached) filtered task-view directory.
 
-        The scratch dir is a flat directory where each top-level entry in the
-        task directory is symlinked. This lets LLM-generated code use relative
-        paths (e.g., `pd.read_csv("Match.csv")`) naturally.
+        The scratch dir is a flat directory of symlinks to legitimate task
+        inputs (anything Profiler would scan) plus Block 4 extracted CSVs.
+        Reserved artifacts (gold.csv, prediction.csv, output/, .dataline_cache/,
+        etc.) are excluded by the same hygiene rules Profiler uses — a single
+        source of truth.
 
-        Also symlinks data_helpers.py so `import data_helpers` works from cwd.
+        Cached per-Sandbox-instance: built once on first call, reused across
+        all later execute() invocations. This is what gets passed to
+        subprocess as TASK_DIR and to StatefulPythonExec, so SQL wrapper +
+        Python helpers + Python cwd all see the SAME filtered view (closes
+        the 2026-05-20 audit Finding 1/2/3 leakage paths).
 
-        Returns:
-            Path to the scratch directory.
+        The original self._task_dir is NEVER passed to user code; it's only
+        used for L2 leak-guard snapshot/restore.
         """
+        if self._scratch_dir is not None:
+            return self._scratch_dir
+
         scratch = tempfile.mkdtemp(prefix="scratch_", dir=self._temp_dir)
         task_path = Path(self._task_dir)
 
         # Reuse the Profiler's hygiene filter so scratch never exposes agent
         # outputs (result.json / prediction.csv / output/) or self-injected
-        # caches (.dataline_cache/). LLM-generated code can otherwise read
-        # these directly via relative path, bypassing the L3 blacklist that
-        # only acted on the manifest.
+        # caches (.dataline_cache/).
+        #
+        # Deep tree-walk + per-file symlink (not per-top-level): glob()
+        # follows directory symlinks, so a shallow `os.symlink(context, ...)`
+        # would leak anything under context/ regardless of filename — e.g.
+        # `context/ground_truth.csv` would appear in `glob(scratch/**/*.csv)`.
+        # Walk every leaf and apply the hygiene filter individually instead.
+        # (2026-05-20 audit Finding 1 fix.)
         from ..profiler.manifest import (
             RESERVED_DIR_BASENAMES,
             _reserved_artifact_reason,
         )
-        for item in task_path.iterdir():
-            # Skip dot-prefixed entries (.dataline_cache, .git, etc.)
-            if item.name.startswith("."):
-                continue
-            # Directory-basename check: top-level reserved dirs (output/,
-            # workspace/, temp/) never reach _reserved_artifact_reason via
-            # parts[:-1] because they appear at the leaf of the iterdir
-            # path — handle them explicitly.
-            if item.is_dir() and item.name in RESERVED_DIR_BASENAMES:
-                continue
-            # File-level check: result.json / prediction.csv / etc.
-            rel = item.relative_to(task_path)
-            if _reserved_artifact_reason(rel) is not None:
-                continue
-            link = Path(scratch) / item.name
-            if not link.exists():
+        for root, dirs, files in os.walk(task_path, followlinks=False):
+            rel_root = Path(root).relative_to(task_path)
+            # Prune reserved + dot-prefixed subdirs in-place so os.walk skips them.
+            dirs[:] = [
+                d for d in dirs
+                if not d.startswith(".") and d not in RESERVED_DIR_BASENAMES
+            ]
+            # Create matching directory under scratch (lazy — only if a file inside passes)
+            scratch_sub = (Path(scratch) / rel_root) if rel_root != Path(".") else Path(scratch)
+            for fname in files:
+                if fname.startswith("."):
+                    continue
+                if fname == "task.json":
+                    # Same Profiler convention — task metadata not exposed as data.
+                    continue
+                rel_path = rel_root / fname if rel_root != Path(".") else Path(fname)
+                if _reserved_artifact_reason(rel_path) is not None:
+                    continue
                 try:
-                    os.symlink(str(item), str(link))
+                    scratch_sub.mkdir(parents=True, exist_ok=True)
                 except OSError:
-                    logger.debug("Could not symlink %s", item)
+                    continue
+                link = scratch_sub / fname
+                if link.exists():
+                    continue
+                try:
+                    os.symlink(os.path.join(root, fname), str(link))
+                except OSError as e:
+                    logger.debug("Could not symlink %s: %s", os.path.join(root, fname), e)
 
         # Also symlink data_helpers so import works from scratch cwd
         helpers = Path(self._temp_dir) / "data_helpers.py"
@@ -478,6 +518,16 @@ class Sandbox:
 
         # Symlink step_result.json location so save_result() writes to TEMP_DIR
         # (data_helpers reads TEMP_DIR env var, so this is not needed here)
+
+        # Cache + rebind StatefulPythonExec so its set_task_context uses the
+        # filtered scratch view, not the raw task_dir. Same closure for SQL
+        # subprocess via env["TASK_DIR"] (see execute()).
+        self._scratch_dir = scratch
+        if self._stateful_repl is not None:
+            try:
+                self._stateful_repl._task_dir = scratch
+            except AttributeError:
+                pass  # foreign REPL impl — leave alone
 
         return scratch
 
