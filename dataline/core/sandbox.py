@@ -490,10 +490,10 @@ class Sandbox:
         all see the SAME filtered view (closes 2026-05-20 audit Finding
         1/2/3 leakage paths).
 
-        Files are HARDLINKED (not symlinked) so `os.readlink` cannot
-        recover the original absolute path — defense against malicious or
-        curious agent code that might use readlink to walk up to the raw
-        task_dir and read gold.csv. Falls back to copy on cross-FS.
+        Files are COPIED (not symlinked or hardlinked) so (a) `os.readlink`
+        cannot recover the original absolute path, and (b) agent writes
+        to scratch don't corrupt the raw input via shared inode (which
+        hardlinks would allow, triggering L2 to delete the original).
 
         The original self._task_dir is NEVER passed to user code; it's only
         used for L2 leak-guard snapshot/restore.

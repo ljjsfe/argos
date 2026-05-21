@@ -83,27 +83,37 @@ def compress_manifest(manifest: Manifest) -> str:
     - DISTINCT values for low-cardinality text columns
     - .md/doc files omitted (already in domain_rules channel)
     """
+    # All emitted paths are sanitized via safe_relative_path so the
+    # LLM never sees an absolute task_dir — agent code could otherwise
+    # construct `open('/abs/task_dir/gold.csv')` and bypass the scratch
+    # sandbox. (2026-05-20 audit follow-up.)
+    from ..profiler.manifest import safe_relative_path
+    root = manifest.task_root
+    def _safe(p: str) -> str:
+        return safe_relative_path(p, root)
+
     parts: list[str] = []
 
     for entry in manifest.entries:
         s = entry.summary
+        path = _safe(entry.file_path)
 
         # Skip documentation files — content flows via domain_rules channel
         if entry.file_type in ("markdown", "pdf", "docx", "image"):
-            parts.append(f"[doc] {entry.file_path} ({entry.file_type})")
+            parts.append(f"[doc] {path} ({entry.file_type})")
             continue
 
         # Flat columns (CSV, JSON, Parquet)
         if "columns" in s:
             parts.append(_format_flat_table(
-                entry.file_path, s.get("row_count", "?"),
+                path, s.get("row_count", "?"),
                 s["columns"], s.get("sample_rows", []),
             ))
 
         # SQLite tables
         elif "tables" in s:
             for table in s["tables"]:
-                label = f"{entry.file_path}/{table.get('name', '?')}"
+                label = f"{path}/{table.get('name', '?')}"
                 parts.append(_format_flat_table(
                     label, table.get("row_count", "?"),
                     table.get("columns", []), table.get("sample_rows", []),
@@ -118,7 +128,7 @@ def compress_manifest(manifest: Manifest) -> str:
         # Excel sheets
         elif "sheets" in s:
             for sheet in s["sheets"]:
-                label = f"{entry.file_path}/{sheet.get('name', '?')}"
+                label = f"{path}/{sheet.get('name', '?')}"
                 parts.append(_format_flat_table(
                     label, sheet.get("row_count", "?"),
                     sheet.get("columns", []), sheet.get("sample_rows", []),
@@ -128,14 +138,14 @@ def compress_manifest(manifest: Manifest) -> str:
         else:
             error = s.get("error", "")
             if error:
-                parts.append(f"{entry.file_path}: ERROR {error}")
+                parts.append(f"{path}: ERROR {error}")
             else:
-                parts.append(f"{entry.file_path} ({entry.file_type})")
+                parts.append(f"{path} ({entry.file_type})")
 
     # Cross-source relations
     for rel in manifest.cross_source_relations:
         parts.append(
-            f"RELATION: {rel.source_a} <-> {rel.source_b}: "
+            f"RELATION: {_safe(rel.source_a)} <-> {_safe(rel.source_b)}: "
             f"{rel.relation} (conf={rel.confidence})"
         )
 

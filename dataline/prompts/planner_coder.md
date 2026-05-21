@@ -38,7 +38,7 @@ Schema reminders:
 
 ## Execution Environment
 
-- **Working directory**: contains symlinks to all task data files (use relative paths)
+- **Working directory**: contains copies of all task data files (use relative paths)
 - **TASK_DIR** / **TEMP_DIR**: env vars available if needed
 - **TASK_DIR is READ-ONLY**: never `open(path, 'w')`, `to_csv`, `to_json`, or `pickle.dump` to any path inside TASK_DIR. All writes (intermediates, results) MUST go to TEMP_DIR via `save_result()` / `save_intermediate()` / explicit absolute paths under TEMP_DIR. Writes into TASK_DIR will be rejected by the sandbox.
 - **Libraries**: pandas, numpy, duckdb, json, re, os, pickle, collections, math

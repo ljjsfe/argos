@@ -270,7 +270,12 @@ def _extract_domain_rules(manifest: Manifest) -> str:
             text = entry.summary.get("text_preview", "")
 
         if text and text.strip():
-            doc_parts.append(f"=== {entry.file_path} ===\n{text}")
+            # Sanitize the doc header — never emit absolute task_dir
+            # to the LLM (would let agent code bypass scratch sandbox
+            # via open('/abs/task_dir/gold.csv')). 2026-05-20 audit fix.
+            from ..profiler.manifest import safe_relative_path
+            header = safe_relative_path(entry.file_path, manifest.task_root)
+            doc_parts.append(f"=== {header} ===\n{text}")
 
     return "\n\n".join(doc_parts)
 

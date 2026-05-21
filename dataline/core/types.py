@@ -32,6 +32,14 @@ class Manifest:
     entries: tuple[ManifestEntry, ...]
     cross_source_relations: tuple[CrossSourceRelation, ...] = ()
     keyword_tags: tuple[str, ...] = ()
+    # Absolute task_dir path used as the root for path-relativization in
+    # prompt emitters. CRITICAL: prompts must NEVER expose the absolute
+    # task_dir to the LLM — otherwise agent code can write
+    # `open('/abs/task_dir/gold.csv')` to bypass the scratch sandbox.
+    # Helpers like `manifest_to_json` and `_extract_domain_rules` use
+    # this to turn entry.file_path into a relative path before emission.
+    # Empty string = no relativization (legacy / direct construction).
+    task_root: str = ""
 
 
 # --- Sandbox types ---

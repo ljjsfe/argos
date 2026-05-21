@@ -172,6 +172,60 @@ class TestScanBlacklist:
         assert "context/csv/reference.csv" in paths
 
 
+class TestPromptPathSanitization:
+    """2026-05-20 audit follow-up: prompts must NEVER expose the absolute
+    task_dir to the LLM. Agent code could otherwise write
+    `open('/abs/task_dir/gold.csv', 'r')` and bypass the scratch sandbox
+    via a direct absolute-path read.
+
+    Verified attack: scan() emitted entry.file_path as absolute into
+    manifest_to_json(). LLM saw path in prompt, derived dirname, opened
+    gold.csv successfully ("SECRET").
+    """
+
+    def test_manifest_json_uses_relative_paths(self, tmp_path):
+        from dataline.profiler.manifest import scan, manifest_to_json
+        _write(tmp_path / "task.json", "{}")
+        _write(tmp_path / "context/csv/data.csv", "a\n1\n")
+        m = scan(str(tmp_path))
+        mj = manifest_to_json(m)
+        # The absolute task_dir must NOT appear anywhere in the prompt.
+        assert str(tmp_path) not in mj
+        # But relative path SHOULD appear.
+        assert "context/csv/data.csv" in mj
+
+    def test_manifest_summary_uses_relative_paths(self, tmp_path):
+        from dataline.profiler.manifest import scan
+        from dataline.core.state import compress_manifest
+        _write(tmp_path / "task.json", "{}")
+        _write(tmp_path / "context/csv/data.csv", "a\n1\n")
+        m = scan(str(tmp_path))
+        ms = compress_manifest(m)
+        assert str(tmp_path) not in ms
+
+    def test_domain_rules_doc_header_uses_relative_paths(self, tmp_path):
+        from dataline.profiler.manifest import scan
+        from dataline.agents.analyzer import _extract_domain_rules
+        _write(tmp_path / "task.json", "{}")
+        _write(tmp_path / "context/knowledge.md", "# notes\nsome text\n")
+        m = scan(str(tmp_path))
+        dr = _extract_domain_rules(m)
+        assert str(tmp_path) not in dr
+        # Doc header should use the relative path.
+        assert "=== context/knowledge.md ===" in dr
+
+    def test_safe_relative_path_helper(self):
+        from dataline.profiler.manifest import safe_relative_path
+        # Inside root → relative
+        assert safe_relative_path("/a/b/c/d.csv", "/a/b") == "c/d.csv"
+        # Outside root → basename only
+        assert safe_relative_path("/other/place/secret.csv", "/a/b") == "secret.csv"
+        # Empty root → basename
+        assert safe_relative_path("/a/b/c.csv", "") == "c.csv"
+        # Empty path → empty
+        assert safe_relative_path("", "/a/b") == ""
+
+
 class TestScanDotDirs:
     """Profiler must not descend into dot-directories (e.g., self-created
     .dataline_cache or external .git, .ipynb_checkpoints).

@@ -145,6 +145,7 @@ def scan(task_dir: str) -> Manifest:
         entries=tuple(entries),
         cross_source_relations=tuple(relations),
         keyword_tags=tuple(tags),
+        task_root=task_dir_abs,
     )
 
 
@@ -174,10 +175,41 @@ def _extract_tags(entries: list[ManifestEntry]) -> list[str]:
     return sorted(tags)
 
 
+def safe_relative_path(abs_path: str, task_root: str) -> str:
+    """Return a path that is safe to emit into LLM prompts.
+
+    Converts absolute paths under task_root to relative form. Anything
+    outside task_root (e.g. helper / cache / extracted CSV) falls back
+    to basename — never expose absolute paths to the LLM.
+
+    Reason: agent code can otherwise do `open('/abs/task_dir/gold.csv')`
+    and bypass the scratch sandbox entirely. (2026-05-20 audit follow-up.)
+    """
+    if not abs_path:
+        return abs_path
+    if not task_root:
+        return os.path.basename(abs_path)
+    try:
+        rel = os.path.relpath(abs_path, task_root)
+    except ValueError:
+        return os.path.basename(abs_path)
+    # If relpath produces ".." it means path is outside task_root — fall
+    # back to basename to avoid leaking sibling structure.
+    if rel.startswith(".."):
+        return os.path.basename(abs_path)
+    return rel
+
+
 def manifest_to_json(manifest: Manifest) -> str:
-    """Serialize manifest to JSON string for prompts."""
+    """Serialize manifest to JSON string for prompts.
+
+    File paths are RELATIVIZED against manifest.task_root before
+    emission — never expose absolute paths to the LLM (would let
+    agent code construct `open('/abs/task_dir/gold.csv')`).
+    """
     import json
 
+    root = manifest.task_root
     data = {
         "files": [],
         "cross_source_relations": [],
@@ -190,15 +222,15 @@ def manifest_to_json(manifest: Manifest) -> str:
             if k != "text_preview"
         }
         data["files"].append({
-            "path": entry.file_path,
+            "path": safe_relative_path(entry.file_path, root),
             "type": entry.file_type,
             "size_bytes": entry.size_bytes,
             "summary": summary,
         })
     for rel in manifest.cross_source_relations:
         data["cross_source_relations"].append({
-            "source_a": rel.source_a,
-            "source_b": rel.source_b,
+            "source_a": safe_relative_path(rel.source_a, root),
+            "source_b": safe_relative_path(rel.source_b, root),
             "relation": rel.relation,
             "confidence": rel.confidence,
         })
