@@ -233,7 +233,7 @@ class Sandbox:
         self._temp_dir = tempfile.mkdtemp(prefix="dataline_")
         self._step_count = 0
         self._stateful_repl = stateful_repl
-        # Extra CSV paths to symlink into scratch dir on first build.
+        # Extra CSV paths to materialize (copy) into scratch on first build.
         # Set by orchestrator after Profiler doc-extraction step (Block 4).
         # Each tuple is (link_basename, absolute_csv_path) so the link can
         # use a friendly DuckDB view name regardless of the cache filename.
@@ -296,7 +296,7 @@ class Sandbox:
         if language == "sql":
             code = self._wrap_sql(code)
 
-        # Determine cwd: scratch dir (symlinks) or temp dir (legacy)
+        # Determine cwd: scratch dir (file copies) or temp dir (legacy)
         if use_scratch:
             run_dir = self._build_scratch()
         else:
@@ -511,7 +511,7 @@ class Sandbox:
         # outputs (result.json / prediction.csv / output/) or self-injected
         # caches (.dataline_cache/).
         #
-        # Deep tree-walk + per-file symlink (not per-top-level): glob()
+        # Deep tree-walk + per-file copy (not per-top-level): glob()
         # follows directory symlinks, so a shallow `os.symlink(context, ...)`
         # would leak anything under context/ regardless of filename — e.g.
         # `context/ground_truth.csv` would appear in `glob(scratch/**/*.csv)`.

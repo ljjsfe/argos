@@ -118,11 +118,19 @@ def _collect_doc_files(task_dir: Path) -> list[Path]:
     return out
 
 
-def _read_and_concat(files: list[Path], max_bytes: int) -> tuple[str, list[str]]:
+def _read_and_concat(
+    files: list[Path], max_bytes: int, task_root: str = "",
+) -> tuple[str, list[str]]:
     """Return (concatenated_text_with_headers, list_of_relative_paths).
 
     Truncates total payload to `max_bytes` to keep the LLM prompt small.
     """
+    # Sanitize paths for prompt + downstream hints. Same defense as
+    # manifest_to_json: never expose absolute task_dir to the LLM —
+    # agent code could derive it and `open('/abs/task_dir/gold.csv')`,
+    # bypassing the scratch sandbox. (2026-05-20 audit follow-up.)
+    from ..profiler.manifest import safe_relative_path
+
     chunks: list[str] = []
     paths_used: list[str] = []
     total = 0
@@ -131,7 +139,7 @@ def _read_and_concat(files: list[Path], max_bytes: int) -> tuple[str, list[str]]
             text = p.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
-        rel = str(p)
+        rel = safe_relative_path(str(p), task_root) if task_root else p.name
         header = f"\n===== {rel} =====\n"
         block = header + text + "\n"
         if total + len(block) > max_bytes:
@@ -410,7 +418,7 @@ def extract_doc_glossary(
     if cached is not None:
         return cached
 
-    payload, paths_used = _read_and_concat(files, max_doc_bytes)
+    payload, paths_used = _read_and_concat(files, max_doc_bytes, task_root=task_dir)
     if not payload.strip():
         return EMPTY_GLOSSARY
 

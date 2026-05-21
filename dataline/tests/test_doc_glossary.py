@@ -341,6 +341,25 @@ class TestCacheLocation:
 
 # ── cache key stability ──────────────────────────────────────────
 
+def test_read_and_concat_uses_relative_paths(tmp_path):
+    """2026-05-20 audit follow-up: B2 _read_and_concat must sanitize
+    file paths in the prompt header. Raw absolute task_dir in header
+    leaks via LLM → source_section → Planner hints, allowing agent
+    code to bypass scratch sandbox via open('/abs/task_dir/gold.csv').
+    """
+    from dataline.agents.doc_glossary import _read_and_concat
+    (tmp_path / "context").mkdir()
+    (tmp_path / "context" / "knowledge.md").write_text("# notes\nsome text\n")
+    files = [tmp_path / "context" / "knowledge.md"]
+    payload, paths_used = _read_and_concat(files, max_bytes=10000, task_root=str(tmp_path))
+    # Absolute task_dir must not appear in the LLM-facing payload.
+    assert str(tmp_path) not in payload
+    # Relative path SHOULD be in the header.
+    assert "context/knowledge.md" in payload
+    # paths_used (used downstream for source_section hints) also clean.
+    assert all(str(tmp_path) not in p for p in paths_used)
+
+
 def test_cache_key_stable(tmp_path):
     (tmp_path / "a.md").write_text("alpha")
     (tmp_path / "b.md").write_text("beta")
