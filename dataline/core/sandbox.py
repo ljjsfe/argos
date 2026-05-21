@@ -421,25 +421,85 @@ class Sandbox:
 
         return _SQL_RUNNER_TEMPLATE.replace("__SQL_PLACEHOLDER__", escaped_sql)
 
+    def _link_or_copy(self, src: str, dst: str) -> bool:
+        """Materialize `src` as `dst` without leaking `src`'s real path.
+
+        Tries hardlink first (same inode, zero copy cost, AND
+        `os.readlink(dst)` raises EINVAL so the agent can't recover the
+        original absolute path). Falls back to shutil.copy2 on cross-
+        filesystem (EXDEV) or other OSError.
+
+        Returns True on success. Logs + returns False on failure (caller
+        skips that file).
+
+        This is the 2026-05-20 audit Finding 1 fix: previously we used
+        os.symlink, which left the target path readable via `os.readlink`,
+        letting agent code walk up to the raw task_dir and read gold.csv.
+        """
+        try:
+            os.link(src, dst)
+            return True
+        except OSError as e:
+            # EXDEV = cross-device, ENOTSUP = filesystem lacks hardlink.
+            # Fall back to copy.
+            try:
+                shutil.copy2(src, dst)
+                return True
+            except OSError as e2:
+                logger.debug(
+                    "Could not materialize %s → %s (link: %s; copy: %s)",
+                    src, dst, e, e2,
+                )
+                return False
+
+    def _sync_extra_csv_links(self, scratch: str) -> None:
+        """Materialize Block 4 extracted CSVs into scratch.
+
+        Idempotent — safe to call repeatedly. This is intentionally split
+        out of the cached scratch build so late-added entries to
+        self.extra_csv_links (set by orchestrator AFTER Sandbox creation)
+        still propagate on every _build_scratch() call. (2026-05-20 audit
+        Finding 2 fix.)
+        """
+        for link_basename, csv_path in self.extra_csv_links:
+            link = Path(scratch) / f"{link_basename}.csv"
+            if link.exists():
+                continue
+            if not Path(csv_path).is_file():
+                logger.debug(
+                    "extra_csv missing: %s (link %s)", csv_path, link_basename,
+                )
+                continue
+            self._link_or_copy(csv_path, str(link))
+
     def _build_scratch(self) -> str:
         """Build (or return cached) filtered task-view directory.
 
-        The scratch dir is a flat directory of symlinks to legitimate task
-        inputs (anything Profiler would scan) plus Block 4 extracted CSVs.
-        Reserved artifacts (gold.csv, prediction.csv, output/, .dataline_cache/,
-        etc.) are excluded by the same hygiene rules Profiler uses — a single
-        source of truth.
+        The scratch dir is a flat directory of materialized copies of
+        legitimate task inputs (anything Profiler would scan) plus Block 4
+        extracted CSVs. Reserved artifacts (gold.csv, prediction.csv,
+        output/, .dataline_cache/, etc.) are excluded by the same hygiene
+        rules Profiler uses — a single source of truth.
 
-        Cached per-Sandbox-instance: built once on first call, reused across
-        all later execute() invocations. This is what gets passed to
-        subprocess as TASK_DIR and to StatefulPythonExec, so SQL wrapper +
-        Python helpers + Python cwd all see the SAME filtered view (closes
-        the 2026-05-20 audit Finding 1/2/3 leakage paths).
+        Cached per-Sandbox-instance: input tree is built once on first
+        call; extra_csv_links are re-synced on every call (cheap, idempotent).
+        This is what gets passed to subprocess as TASK_DIR and to
+        StatefulPythonExec, so SQL wrapper + Python helpers + Python cwd
+        all see the SAME filtered view (closes 2026-05-20 audit Finding
+        1/2/3 leakage paths).
+
+        Files are HARDLINKED (not symlinked) so `os.readlink` cannot
+        recover the original absolute path — defense against malicious or
+        curious agent code that might use readlink to walk up to the raw
+        task_dir and read gold.csv. Falls back to copy on cross-FS.
 
         The original self._task_dir is NEVER passed to user code; it's only
         used for L2 leak-guard snapshot/restore.
         """
+        # Cache hit: still re-sync extra_csv_links in case orchestrator
+        # added more between iterations (Finding 2 timing assumption fix).
         if self._scratch_dir is not None:
+            self._sync_extra_csv_links(self._scratch_dir)
             return self._scratch_dir
 
         scratch = tempfile.mkdtemp(prefix="scratch_", dir=self._temp_dir)
@@ -484,37 +544,20 @@ class Sandbox:
                 link = scratch_sub / fname
                 if link.exists():
                     continue
-                try:
-                    os.symlink(os.path.join(root, fname), str(link))
-                except OSError as e:
-                    logger.debug("Could not symlink %s: %s", os.path.join(root, fname), e)
+                self._link_or_copy(os.path.join(root, fname), str(link))
 
-        # Also symlink data_helpers so import works from scratch cwd
+        # data_helpers must be available for `import data_helpers` from cwd.
+        # Hardlink for consistency (no path-leak risk; symlink would also be
+        # fine since this is our own file, but uniform = simpler).
         helpers = Path(self._temp_dir) / "data_helpers.py"
         if helpers.exists():
             link = Path(scratch) / "data_helpers.py"
             if not link.exists():
-                try:
-                    os.symlink(str(helpers), str(link))
-                except OSError:
-                    pass
+                self._link_or_copy(str(helpers), str(link))
 
-        # Block 4: symlink extra CSVs produced by Profiler doc-extraction.
-        # Friendly basename (e.g. "narrative_patient.csv") makes DuckDB
-        # auto-register the view by that name, exposing it to Planner SQL.
-        for link_basename, csv_path in self.extra_csv_links:
-            link = Path(scratch) / f"{link_basename}.csv"
-            if link.exists():
-                continue
-            if not Path(csv_path).is_file():
-                logger.debug(
-                    "extra_csv missing: %s (link %s)", csv_path, link_basename,
-                )
-                continue
-            try:
-                os.symlink(csv_path, str(link))
-            except OSError as e:
-                logger.debug("could not symlink extracted CSV %s: %s", csv_path, e)
+        # Block 4: extracted CSVs (delegated to _sync helper for re-use
+        # across cache hits — Finding 2 fix).
+        self._sync_extra_csv_links(scratch)
 
         # Symlink step_result.json location so save_result() writes to TEMP_DIR
         # (data_helpers reads TEMP_DIR env var, so this is not needed here)

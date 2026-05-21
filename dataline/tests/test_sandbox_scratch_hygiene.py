@@ -84,6 +84,62 @@ class TestScratchHygiene:
         finally:
             shutil.rmtree(sb.temp_dir, ignore_errors=True)
 
+    def test_hardlink_blocks_readlink_path_leak(self):
+        """2026-05-20 audit Finding 1: with symlinks, agent code could
+        `os.readlink('data.csv')` to recover the raw task_dir absolute
+        path and then read gold.csv. Hardlinks make os.readlink raise
+        EINVAL — the absolute path is not exposed."""
+        import tempfile
+        td = Path(tempfile.mkdtemp(prefix="readlink_test_"))
+        try:
+            _write(td / "context/csv/data.csv", "a\n1\n")
+            _write(td / "gold.csv", "SECRET\n")
+            sb = self._make_sandbox(td)
+            try:
+                scratch = Path(sb._build_scratch())
+                materialized = scratch / "context" / "csv" / "data.csv"
+                assert materialized.exists()
+                # 1. Not a symlink — readlink should raise.
+                assert not materialized.is_symlink()
+                with pytest.raises(OSError):
+                    import os
+                    os.readlink(str(materialized))
+                # 2. But the file is still readable as expected.
+                assert materialized.read_text().strip() == "a\n1"
+                # 3. Same inode as the source = it's a hardlink, not a copy.
+                import os as _os
+                assert _os.stat(materialized).st_ino == _os.stat(td / "context/csv/data.csv").st_ino
+            finally:
+                shutil.rmtree(sb.temp_dir, ignore_errors=True)
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+
+    def test_late_added_extra_csv_links_propagate_on_rebuild(self):
+        """2026-05-20 audit Finding 2: extra_csv_links set AFTER the first
+        execute() were silently dropped because scratch was cached. Fix:
+        every _build_scratch() call re-syncs extra_csv_links."""
+        import tempfile
+        td = Path(tempfile.mkdtemp(prefix="late_csv_test_"))
+        try:
+            _write(td / "context/data.csv", "a\n1\n")
+            sb = self._make_sandbox(td)
+            try:
+                # First build with no extras
+                scratch = sb._build_scratch()
+                # Late-add an extra link
+                fake_csv = td / "narrative_late_src.csv"
+                fake_csv.write_text("x\n42\n")
+                sb.extra_csv_links = [("narrative_late", str(fake_csv))]
+                # Re-build (cache hit + sync)
+                sb._build_scratch()
+                late = Path(scratch) / "narrative_late.csv"
+                assert late.exists(), "late-added extra CSV should propagate"
+                assert late.read_text().strip() == "x\n42"
+            finally:
+                shutil.rmtree(sb.temp_dir, ignore_errors=True)
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+
     def test_deep_walk_blocks_reserved_at_any_depth(self):
         """2026-05-20 audit Finding 1 regression: scratch must filter
         reserved filenames inside non-reserved subdirs (e.g. context/
