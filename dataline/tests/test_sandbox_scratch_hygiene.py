@@ -16,6 +16,8 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+import pytest
+
 from dataline.core.sandbox import Sandbox
 
 
