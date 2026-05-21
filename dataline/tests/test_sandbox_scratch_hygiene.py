@@ -86,11 +86,12 @@ class TestScratchHygiene:
         finally:
             shutil.rmtree(sb.temp_dir, ignore_errors=True)
 
-    def test_hardlink_blocks_readlink_path_leak(self):
+    def test_materialized_file_blocks_readlink_path_leak(self):
         """2026-05-20 audit Finding 1: with symlinks, agent code could
         `os.readlink('data.csv')` to recover the raw task_dir absolute
-        path and then read gold.csv. Hardlinks make os.readlink raise
-        EINVAL — the absolute path is not exposed."""
+        path and then read gold.csv. Materialized copies (not symlinks)
+        make os.readlink raise EINVAL — the absolute path is not exposed.
+        """
         import tempfile
         td = Path(tempfile.mkdtemp(prefix="readlink_test_"))
         try:
@@ -106,11 +107,41 @@ class TestScratchHygiene:
                 with pytest.raises(OSError):
                     import os
                     os.readlink(str(materialized))
-                # 2. But the file is still readable as expected.
+                # 2. File is still readable.
                 assert materialized.read_text().strip() == "a\n1"
-                # 3. Same inode as the source = it's a hardlink, not a copy.
-                import os as _os
-                assert _os.stat(materialized).st_ino == _os.stat(td / "context/csv/data.csv").st_ino
+            finally:
+                shutil.rmtree(sb.temp_dir, ignore_errors=True)
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+
+    def test_scratch_write_does_not_corrupt_raw_input(self):
+        """2026-05-20 audit follow-up: an earlier attempt used hardlinks
+        for cost reasons, but hardlinks share the inode — writes to the
+        scratch file modify the raw task_dir file. Then the L2 leak-guard
+        detects the mtime change and DELETES the raw input. Verified
+        before fix: raw context/csv/data.csv removed after agent wrote
+        to scratch path. Fix: scratch uses copies, not hardlinks. This
+        test asserts the raw file is untouched after a scratch write.
+        """
+        import tempfile, os as _os
+        td = Path(tempfile.mkdtemp(prefix="corrupt_test_"))
+        try:
+            raw_input = td / "context" / "csv" / "data.csv"
+            _write(raw_input, "original_content\n")
+            raw_inode_before = _os.stat(raw_input).st_ino
+            sb = self._make_sandbox(td)
+            try:
+                scratch = Path(sb._build_scratch())
+                materialized = scratch / "context" / "csv" / "data.csv"
+                # Scratch file must have a DIFFERENT inode (not a hardlink).
+                assert _os.stat(materialized).st_ino != raw_inode_before, (
+                    "scratch is a hardlink — write-through corruption possible"
+                )
+                # Simulate the agent overwriting the scratch file.
+                materialized.write_text("AGENT_OVERWROTE\n")
+                # Raw input must be untouched.
+                assert raw_input.exists(), "raw input was deleted (L2 false positive)"
+                assert raw_input.read_text().strip() == "original_content"
             finally:
                 shutil.rmtree(sb.temp_dir, ignore_errors=True)
         finally:

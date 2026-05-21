@@ -5,9 +5,13 @@ Supports two execution modes:
 - SQL (.sql): raw SQL executed via DuckDB (unified engine for CSV, JSON,
   Parquet, and SQLite .db files) with automatic registration and save_result()
 
-Path resolution: a symlink scratch directory is created per execution so that
-generated code can reference data files by their basename (relative path).
-LLM-generated code sees flat filenames in cwd; no need for os.environ["TASK_DIR"].
+Path resolution: a filtered scratch directory is created per task (cached
+across iterations) where legitimate input files are materialized via
+shutil.copy2 — not symlink/hardlink. Copy is required to (a) prevent
+os.readlink leaking the raw task_dir absolute path, and (b) prevent
+write-through corruption of the raw input (which hardlinks would allow).
+LLM-generated code sees flat filenames in cwd; no need for
+os.environ["TASK_DIR"]. See 2026-05-20 audit Findings 1+2 for details.
 """
 
 from __future__ import annotations
@@ -258,9 +262,9 @@ class Sandbox:
             code: Python script or raw SQL query.
             step_id: Step identifier for file naming.
             language: "python" | "sql" — if "sql", wraps in DuckDB/SQLite runner.
-            use_scratch: If True, run in scratch dir with symlinks to task files
-                so code can use relative paths. Set False for Analyzer steps that
-                should not be affected by cwd changes.
+            use_scratch: If True, run in filtered scratch dir (copies of
+                task files) so code can use relative paths. Set False for
+                Analyzer steps that should not be affected by cwd changes.
 
         Returns:
             SandboxResult with stdout, stderr, return_code, structured_json.
@@ -421,36 +425,34 @@ class Sandbox:
 
         return _SQL_RUNNER_TEMPLATE.replace("__SQL_PLACEHOLDER__", escaped_sql)
 
-    def _link_or_copy(self, src: str, dst: str) -> bool:
-        """Materialize `src` as `dst` without leaking `src`'s real path.
+    def _materialize(self, src: str, dst: str) -> bool:
+        """Copy `src` to `dst` so scratch is fully isolated from raw input.
 
-        Tries hardlink first (same inode, zero copy cost, AND
-        `os.readlink(dst)` raises EINVAL so the agent can't recover the
-        original absolute path). Falls back to shutil.copy2 on cross-
-        filesystem (EXDEV) or other OSError.
+        Why copy and not hardlink: an earlier attempt used `os.link()`
+        (zero copy cost, AND `os.readlink(dst)` raises EINVAL so the
+        original absolute path can't be recovered). BUT hardlinks share
+        the inode — if the agent does `open('data.csv', 'w').write(...)`
+        the raw task_dir file gets overwritten, and the L2 leak-guard
+        then DELETES it as "agent wrote to TASK_DIR". Verified repro:
+        raw `data.csv` removed mid-task. (2026-05-20 audit follow-up.)
 
-        Returns True on success. Logs + returns False on failure (caller
-        skips that file).
+        Copy is the safe answer:
+          - Agent writes go to scratch only; raw input is untouched.
+          - `os.readlink(dst)` still raises EINVAL (dst is a regular
+            file, not a symlink) so the path-leak from the previous
+            audit Finding 1 is still closed.
+          - Cost is a one-time hit at task start (~MB/s × file sizes);
+            scratch is cached across iterations so we pay once per task.
 
-        This is the 2026-05-20 audit Finding 1 fix: previously we used
-        os.symlink, which left the target path readable via `os.readlink`,
-        letting agent code walk up to the raw task_dir and read gold.csv.
+        Returns True on success, False on any OSError (caller skips that
+        entry).
         """
         try:
-            os.link(src, dst)
+            shutil.copy2(src, dst)
             return True
         except OSError as e:
-            # EXDEV = cross-device, ENOTSUP = filesystem lacks hardlink.
-            # Fall back to copy.
-            try:
-                shutil.copy2(src, dst)
-                return True
-            except OSError as e2:
-                logger.debug(
-                    "Could not materialize %s → %s (link: %s; copy: %s)",
-                    src, dst, e, e2,
-                )
-                return False
+            logger.debug("Could not copy %s → %s: %s", src, dst, e)
+            return False
 
     def _sync_extra_csv_links(self, scratch: str) -> None:
         """Materialize Block 4 extracted CSVs into scratch.
@@ -470,7 +472,7 @@ class Sandbox:
                     "extra_csv missing: %s (link %s)", csv_path, link_basename,
                 )
                 continue
-            self._link_or_copy(csv_path, str(link))
+            self._materialize(csv_path, str(link))
 
     def _build_scratch(self) -> str:
         """Build (or return cached) filtered task-view directory.
@@ -544,7 +546,7 @@ class Sandbox:
                 link = scratch_sub / fname
                 if link.exists():
                     continue
-                self._link_or_copy(os.path.join(root, fname), str(link))
+                self._materialize(os.path.join(root, fname), str(link))
 
         # data_helpers must be available for `import data_helpers` from cwd.
         # Hardlink for consistency (no path-leak risk; symlink would also be
@@ -553,7 +555,7 @@ class Sandbox:
         if helpers.exists():
             link = Path(scratch) / "data_helpers.py"
             if not link.exists():
-                self._link_or_copy(str(helpers), str(link))
+                self._materialize(str(helpers), str(link))
 
         # Block 4: extracted CSVs (delegated to _sync helper for re-use
         # across cache hits — Finding 2 fix).
