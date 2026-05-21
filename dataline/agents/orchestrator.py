@@ -298,6 +298,17 @@ def run_task(
         _log(trace, "task_router", f"Task mode: {task_mode}")
         obs["task_mode"] = task_mode
 
+        # ─── Stage 3c-prelude: Evidence Ledger (Phase 1 dual-write) ──────
+        # Per docs/EVIDENCE_LEDGER_DESIGN.md. Construct an empty ledger;
+        # each downstream emitter dual-writes (legacy state field AS WELL
+        # AS ledger.add). PlannerCoder reads ledger only when
+        # DATALINE_EVIDENCE_LEDGER=1 is set; otherwise legacy path used.
+        # Default OFF → production prompts byte-identical to pre-ledger ship.
+        from ..core.evidence_ledger import (
+            CANONICAL_PRIORITIES, Evidence, EvidenceLedger,
+        )
+        ledger = EvidenceLedger()
+
         # ─── Stage 3c': Focus hints — question entity → manifest binding ───
         # Deterministic, zero LLM. Universal across benchmarks. Replaces the
         # filename-as-hint mechanism that previously leaked through polluted
@@ -307,6 +318,12 @@ def run_task(
             _fh = build_focus_hints(question, manifest)
             if _fh:
                 state = set_focus_hints(state, _fh)
+                ledger.add(Evidence(
+                    source="focus_hints",
+                    payload=_fh,
+                    priority=CANONICAL_PRIORITIES["focus_hints"],
+                    trace_tag=f"lines={_fh.count(chr(10))+1}",
+                ))
                 _log(trace, "focus_hints", f"{_fh.count(chr(10))+1} hints generated")
                 obs["focus_hints_lines"] = _fh.count("\n") + 1
         except Exception as e:
@@ -323,6 +340,12 @@ def run_task(
                 _db = build_domain_bindings(question, task_dir, manifest)
                 if _db:
                     state = set_domain_bindings(state, _db)
+                    ledger.add(Evidence(
+                        source="domain_bindings",
+                        payload=_db,
+                        priority=CANONICAL_PRIORITIES["domain_bindings"],
+                        trace_tag=f"lines={_db.count(chr(10))+1}",
+                    ))
                     _log(trace, "domain_bindings", f"{_db.count(chr(10))+1} bindings generated")
                     obs["domain_bindings_lines"] = _db.count("\n") + 1
             except Exception as e:
@@ -341,12 +364,22 @@ def run_task(
             _dg_hints = build_doc_glossary_hints(question, _glossary)
             if _dg_hints:
                 state = set_doc_glossary_hints(state, _dg_hints)
+                ledger.add(Evidence(
+                    source="doc_glossary",
+                    payload=_dg_hints,
+                    priority=CANONICAL_PRIORITIES["doc_glossary"],
+                    trace_tag=f"terms={len(_glossary.terms)},lines={_dg_hints.count(chr(10))+1}",
+                ))
                 _log(trace, "doc_glossary",
                      f"{len(_glossary.terms)} terms; {_dg_hints.count(chr(10))+1} hints")
                 obs["doc_glossary_terms"] = len(_glossary.terms)
                 obs["doc_glossary_hint_lines"] = _dg_hints.count("\n") + 1
         except Exception as e:
             _log(trace, "doc_glossary", f"skipped: {e}")
+
+        # Snapshot ledger summary into trace observations (always, even when
+        # the read-path is disabled — gives us telemetry for future ablation).
+        obs["evidence_ledger"] = ledger.summary()
 
         # ─── Stage 3d: Playbook retrieval (curated patterns, zero LLM) ───
         # Fail-soft: missing/empty playbook → no hints, no behavior change.
